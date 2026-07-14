@@ -1,0 +1,15 @@
+# 科学计算核心
+sympy>=1.12
+pint>=0.23
+mendeleev>=0.14
+
+# MCP 协议
+mcp>=1.9.0
+
+# RAG / 向量检索
+chromadb>=0.5.0
+sentence-transformers>=3.0.0
+
+# 通用
+httpx>=0.24.0
+PyPDF2>=3.0.0
