@@ -1,17 +1,17 @@
 /**
  * rag-extension — RAG 知识检索扩展
  *
- * 提供 rag_search（检索）、rag_ingest（摄入）、rag_stats（统计）工具。
- * 通过 Python rag_server.py 子进程操作 ChromaDB，
- * 支持公式感知分块和权威来源标记。
+ * 直接桥接 agent_learning 的 science_kb_ingest 模块（通过 agent_learning_bridge.py），
+ * 复用 D:\agent_learning\data\chroma 共享 ChromaDB 实例。
+ *
+ * 支持公式感知分块、权威来源标记、混合检索（BM25 + 语义 → RRF）。
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { join } from "node:path";
 import {
   createMcpProcess,
-  callMcpTool,
-  initMcpServer,
+  callBridge,
   killMcpProcess,
   type McpProcess,
 } from "../shared/mcp-bridge";
@@ -19,24 +19,23 @@ import {
 export default function (pi: ExtensionAPI) {
   let mcp: McpProcess | null = null;
 
-  function getToolsDir(): string {
-    return join(process.cwd(), "python-tools");
+  function getBridgePath(): string {
+    return join(process.cwd(), "python-tools", "agent_learning_bridge.py");
   }
 
   async function ensureMcp(): Promise<McpProcess> {
-    if (!mcp) throw new Error("RAG server not running");
+    if (!mcp) throw new Error("RAG bridge not running");
     return mcp;
   }
 
   // ── 会话生命周期 ─────────────────────────────────────────────────
   pi.on("session_start", async (_event, ctx) => {
     try {
-      mcp = createMcpProcess(join(getToolsDir(), "rag_server.py"));
-      const tools = await initMcpServer(mcp);
-      ctx.ui.notify(`RAG server started (${tools.length} tools)`, "info");
+      mcp = createMcpProcess(getBridgePath());
+      ctx.ui.notify("RAG bridge started (agent_learning science_kb_ingest)", "info");
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      ctx.ui.notify(`RAG server failed: ${msg}`, "error");
+      ctx.ui.notify(`RAG bridge failed: ${msg}`, "error");
     }
   });
 
@@ -50,19 +49,24 @@ export default function (pi: ExtensionAPI) {
     label: "RAG Search",
     description:
       "Search the science knowledge base for authoritative information. " +
-      "Use this to verify facts, look up formulas, or find trusted references before answering.",
+      "Uses agent_learning's hybrid retrieval (BM25 + semantic → RRF fusion). " +
+      "Results include authority level and confidence scores.",
     parameters: Type.Object({
       query: Type.String({ description: "Search query" }),
-      n_results: Type.Optional(Type.Number({ description: "Max results (default 5)" })),
-      topic: Type.Optional(Type.String({ description: "Filter by topic: chemistry / physics / math" })),
+      top_k: Type.Optional(Type.Number({ description: "Max results (default 5)" })),
+      collection: Type.Optional(
+        Type.String({
+          description: "Collection: all / science_kb / user_uploads (default all)",
+        }),
+      ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate) {
       const rag = await ensureMcp();
-      const p = params as { query: string; n_results?: number; topic?: string };
-      const result = await callMcpTool(rag, "rag_search", {
+      const p = params as { query: string; top_k?: number; collection?: string };
+      const result = await callBridge(rag, "rag_search", {
         query: p.query,
-        n_results: p.n_results || 5,
-        topic: p.topic,
+        top_k: p.top_k || 5,
+        collection: p.collection || "all",
       });
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
@@ -77,36 +81,24 @@ export default function (pi: ExtensionAPI) {
     label: "RAG Ingest",
     description:
       "Ingest a document into the knowledge base. " +
-      "Supports formula-aware chunking: math/chemistry formulas are preserved intact. " +
-      "Mark source authority level (textbook / paper / wikipedia / other).",
+      "Uses agent_learning's formula-aware chunking (math/chemistry formulas preserved intact). " +
+      "Auto-detects source authority level (textbook / peer_reviewed / wikipedia / course_material).",
     parameters: Type.Object({
       content: Type.String({ description: "Document content to ingest" }),
-      source: Type.String({ description: 'Source descriptor, e.g. "Atkins Physical Chemistry 10th Ed"' }),
-      topic: Type.String({ description: "Topic: chemistry / physics / math / general" }),
-      authority: Type.Optional(
-        Type.String({
-          description: "Authority level: textbook / peer_reviewed / wikipedia / course_material / other",
-        }),
+      source: Type.String({ description: 'Source URL or descriptor, e.g. "https://openstax.org/..."' }),
+      title: Type.Optional(Type.String({ description: "Document title" })),
+      collection: Type.Optional(
+        Type.String({ description: "Target collection: science_kb / user_uploads (default science_kb)" }),
       ),
-      metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate) {
       const rag = await ensureMcp();
-      const p = params as {
-        content: string;
-        source: string;
-        topic: string;
-        authority?: string;
-        metadata?: Record<string, unknown>;
-      };
-      const result = await callMcpTool(rag, "rag_ingest", {
+      const p = params as { content: string; source: string; title?: string; collection?: string };
+      const result = await callBridge(rag, "rag_ingest", {
         content: p.content,
         source: p.source,
-        topic: p.topic,
-        metadata: {
-          ...(p.metadata || {}),
-          authority: p.authority || "other",
-        },
+        title: p.title || "",
+        collection: p.collection || "science_kb",
       });
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
@@ -119,11 +111,18 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "rag_stats",
     label: "RAG Stats",
-    description: "Get knowledge base statistics (total chunks, collection info).",
-    parameters: Type.Object({}),
-    async execute(_toolCallId, _params, _signal, _onUpdate) {
+    description: "Get knowledge base statistics (total chunks per collection).",
+    parameters: Type.Object({
+      collection: Type.Optional(
+        Type.String({ description: "Collection: all / science_kb / user_uploads (default all)" }),
+      ),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate) {
       const rag = await ensureMcp();
-      const result = await callMcpTool(rag, "rag_stats", {});
+      const p = params as { collection?: string };
+      const result = await callBridge(rag, "rag_stats", {
+        collection: p.collection || "all",
+      });
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         details: {},
@@ -135,14 +134,16 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "rag_remove",
     label: "RAG Remove",
-    description: "Remove a document and all its chunks from the knowledge base.",
+    description: "Remove an entire collection from the knowledge base. Use with caution.",
     parameters: Type.Object({
-      doc_id: Type.String({ description: "Document ID to remove" }),
+      collection: Type.String({ description: "Collection name to remove" }),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate) {
       const rag = await ensureMcp();
-      const p = params as { doc_id: string };
-      const result = await callMcpTool(rag, "rag_remove", { doc_id: p.doc_id });
+      const p = params as { collection: string };
+      const result = await callBridge(rag, "rag_remove", {
+        collection: p.collection,
+      });
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         details: {},

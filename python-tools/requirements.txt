@@ -1,14 +1,16 @@
-# 科学计算核心
+# agent_workflow Python 工具依赖
+#
+# 注意：记忆/RAG 桥接直接复用 agent_learning 的依赖（chromadb, sentence-transformers 等），
+# 不需要在这里重复安装。agent_learning 已有完整环境。
+# 本文件只列科学计算工具和独立服务的依赖。
+
+# 科学计算核心（MCP chemistry_server / physics_server）
 sympy>=1.12
 pint>=0.23
 mendeleev>=0.14
 
 # MCP 协议
 mcp>=1.9.0
-
-# RAG / 向量检索
-chromadb>=0.5.0
-sentence-transformers>=3.0.0
 
 # 通用
 httpx>=0.24.0

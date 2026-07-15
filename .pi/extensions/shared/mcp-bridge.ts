@@ -99,3 +99,30 @@ export function killMcpProcess(mcp: McpProcess): void {
     // best effort
   }
 }
+
+// ── Flat JSON-RPC bridge (non-MCP, direct method dispatch) ───────────
+
+/**
+ * 调用 flat-method bridge（如 agent_learning_bridge.py）。
+ * 发送 {id, method, params}，接收 {id, result} | {id, error}。
+ */
+export function callBridge(
+  mcp: McpProcess,
+  method: string,
+  params: Record<string, unknown>,
+  timeoutMs = 60000,
+): Promise<unknown> {
+  const id = mcp.requestId++;
+  const request = JSON.stringify({ id, method, params });
+  mcp.proc.stdin!.write(request + "\n");
+
+  return new Promise((resolve, reject) => {
+    mcp.pending.set(id, { resolve, reject });
+    setTimeout(() => {
+      if (mcp.pending.has(id)) {
+        mcp.pending.delete(id);
+        reject(new Error(`Bridge method "${method}" timed out after ${timeoutMs / 1000}s`));
+      }
+    }, timeoutMs);
+  });
+}

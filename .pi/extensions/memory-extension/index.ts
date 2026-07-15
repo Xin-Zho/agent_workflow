@@ -1,20 +1,19 @@
 /**
  * memory-extension — 三层记忆扩展
  *
- * Working Memory:  内存缓冲（TypeScript 管理，会话级）
- * Episodic Memory: ChromaDB "episodic_memory" 集合（Python 管理）
- * Semantic Memory: ChromaDB "semantic_memory" 集合（Python 管理）
+ * 直接桥接 agent_learning 的 MemoryManager（通过 agent_learning_bridge.py），
+ * 复用 D:\agent_learning\data\chroma 共享 ChromaDB 实例。
  *
- * 通过 Python memory_server.py 子进程操作 ChromaDB，
- * 嵌入使用 BGE-small-zh-v1.5。
+ * Working Memory:  TypeScript 内存缓冲（会话级，max 20 turns）
+ * Episodic Memory: ChromaDB "episodic_all" 集合（agent_learning 原生）
+ * Semantic Memory: ChromaDB "semantic_all" 集合（agent_learning 原生）
  */
-import type { ExtensionAPI, ToolCallContext, ToolExecutionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { join } from "node:path";
 import {
   createMcpProcess,
-  callMcpTool,
-  initMcpServer,
+  callBridge,
   killMcpProcess,
   type McpProcess,
 } from "../shared/mcp-bridge";
@@ -49,24 +48,23 @@ function getWorkingContext(): string {
 export default function (pi: ExtensionAPI) {
   let mcp: McpProcess | null = null;
 
-  function getToolsDir(): string {
-    return join(process.cwd(), "python-tools");
+  function getBridgePath(): string {
+    return join(process.cwd(), "python-tools", "agent_learning_bridge.py");
   }
 
   async function ensureMcp(): Promise<McpProcess> {
-    if (!mcp) throw new Error("Memory server not running");
+    if (!mcp) throw new Error("Memory bridge not running");
     return mcp;
   }
 
   // ── 会话生命周期 ─────────────────────────────────────────────────
   pi.on("session_start", async (_event, ctx) => {
     try {
-      mcp = createMcpProcess(join(getToolsDir(), "memory_server.py"));
-      const tools = await initMcpServer(mcp);
-      ctx.ui.notify(`Memory server started (${tools.length} tools)`, "info");
+      mcp = createMcpProcess(getBridgePath());
+      ctx.ui.notify("Memory bridge started (agent_learning MemoryManager)", "info");
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      ctx.ui.notify(`Memory server failed: ${msg}`, "error");
+      ctx.ui.notify(`Memory bridge failed: ${msg}`, "error");
     }
   });
 
@@ -77,43 +75,20 @@ export default function (pi: ExtensionAPI) {
   // ── 上下文注入：每轮注入相关记忆 ──────────────────────────────────
   pi.on("context", async (_event, ctx) => {
     const lastUserMsg = getLastUserMessage(ctx.messages);
-    const sections: string[] = [];
 
-    // Working memory
-    const wm = getWorkingContext();
-    if (wm) sections.push(`## Working Memory (recent conversation)\n${wm}`);
-
-    // Episodic + Semantic search
+    // 直接调用 agent_learning 的 get_context_for_prompt
     if (lastUserMsg && mcp) {
       try {
-        const [episodic, semantic] = await Promise.all([
-          callMcpTool(mcp, "episodic_search", { query: lastUserMsg, n_results: 3 }),
-          callMcpTool(mcp, "semantic_search", { query: lastUserMsg, n_results: 2 }),
-        ]);
-
-        const ep = episodic as { memories?: Array<{ content: string }> };
-        const sm = semantic as { memories?: Array<{ content: string }> };
-
-        if (ep.memories && ep.memories.length > 0) {
-          sections.push(
-            "## Relevant Past Experiences\n" +
-              ep.memories.map((m) => `- ${m.content}`).join("\n"),
-          );
-        }
-        if (sm.memories && sm.memories.length > 0) {
-          sections.push(
-            "## Relevant Knowledge\n" +
-              sm.memories.map((m) => `- ${m.content}`).join("\n"),
-          );
+        const result = await callBridge(mcp, "memory_get_context", {
+          query: lastUserMsg,
+        });
+        const ctx_result = result as { context: string };
+        if (ctx_result.context && ctx_result.context.trim()) {
+          ctx.systemPromptAppend(ctx_result.context);
         }
       } catch {
         // memory search failed, continue without injection
       }
-    }
-
-    if (sections.length > 0) {
-      const injected = `[Memory Context]\n${sections.join("\n\n")}`;
-      ctx.systemPromptAppend(injected);
     }
   });
 
@@ -133,42 +108,39 @@ export default function (pi: ExtensionAPI) {
 
   // ── 注册工具 ─────────────────────────────────────────────────────
 
-  // remember — 智能存储记忆
+  // remember — 智能存储记忆（调用 agent_learning MemoryManager.add）
   pi.registerTool({
     name: "remember",
     label: "Remember",
-    description: "Store a memory. Auto-classifies as episodic (conversation event) or semantic (knowledge fact).",
+    description:
+      "Store a memory. Auto-classifies as episodic (conversation event) or semantic (knowledge/fact). " +
+      "Backed by agent_learning MemoryManager with importance scoring and TTL management.",
     parameters: Type.Object({
       content: Type.String({ description: "Memory content to store" }),
-      type: Type.Optional(Type.String({ description: "Memory type: episodic / semantic (auto if omitted)" })),
-      topic: Type.Optional(Type.String({ description: "Topic tag for semantic memories" })),
+      memory_type: Type.Optional(
+        Type.String({ description: "Memory type: episodic / semantic (auto if omitted)" }),
+      ),
+      importance: Type.Optional(Type.Number({ description: "Importance score 0.0-1.0 (default 0.5)" })),
       metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate) {
       const mem = await ensureMcp();
-      const p = params as { content: string; type?: string; topic?: string; metadata?: Record<string, unknown> };
-      const memType = p.type || (p.topic ? "semantic" : "episodic");
-
-      if (memType === "semantic") {
-        const result = await callMcpTool(mem, "semantic_store", {
-          content: p.content,
-          topic: p.topic || "general",
-          metadata: p.metadata || {},
-        });
-        return {
-          content: [{ type: "text", text: `Semantic memory stored: ${JSON.stringify(result)}` }],
-          details: {},
-        };
-      } else {
-        const result = await callMcpTool(mem, "episodic_store", {
-          content: p.content,
-          metadata: p.metadata || {},
-        });
-        return {
-          content: [{ type: "text", text: `Episodic memory stored: ${JSON.stringify(result)}` }],
-          details: {},
-        };
-      }
+      const p = params as {
+        content: string;
+        memory_type?: string;
+        importance?: number;
+        metadata?: Record<string, unknown>;
+      };
+      const result = await callBridge(mem, "memory_add", {
+        content: p.content,
+        memory_type: p.memory_type || "episodic",
+        importance: p.importance ?? 0.5,
+        metadata: p.metadata,
+      });
+      return {
+        content: [{ type: "text", text: `Memory stored: ${JSON.stringify(result)}` }],
+        details: {},
+      };
     },
   });
 
@@ -176,101 +148,98 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "recall",
     label: "Recall",
-    description: "Search all memory layers (working + episodic + semantic) for relevant information.",
+    description:
+      "Search all memory layers (working + episodic + semantic) for relevant information. " +
+      "Uses agent_learning's hybrid retrieval with importance/recency weighting.",
     parameters: Type.Object({
       query: Type.String({ description: "Search query" }),
-      n_results: Type.Optional(Type.Number({ description: "Max results per layer (default 5)" })),
+      limit: Type.Optional(Type.Number({ description: "Max results (default 5)" })),
+      memory_types: Type.Optional(
+        Type.Array(Type.String(), { description: 'Filter: ["episodic", "semantic"] (default both)' }),
+      ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate) {
       const mem = await ensureMcp();
-      const p = params as { query: string; n_results?: number };
-      const n = p.n_results || 5;
-
-      const [episodic, semantic] = await Promise.all([
-        callMcpTool(mem, "episodic_search", { query: p.query, n_results: n }),
-        callMcpTool(mem, "semantic_search", { query: p.query, n_results: n }),
-      ]);
-
-      const result = {
+      const p = params as { query: string; limit?: number; memory_types?: string[] };
+      const result = await callBridge(mem, "memory_search", {
+        query: p.query,
+        limit: p.limit || 5,
+        memory_types: p.memory_types,
+      });
+      const searchResult = result as { items: Array<{ id: string; content: string; memory_type: string }> };
+      const response = {
         working: workingMemory
           .filter((e) => e.content.includes(p.query))
           .slice(-3)
           .map((e) => ({ role: e.role, content: e.content.slice(0, 300) })),
-        episodic: (episodic as { memories?: unknown[] }).memories || [],
-        semantic: (semantic as { memories?: unknown[] }).memories || [],
+        long_term: searchResult.items,
       };
-
       return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        content: [{ type: "text", text: JSON.stringify(response, null, 2) }],
         details: {},
       };
     },
   });
 
-  // forget — 删除记忆
+  // forget — 执行遗忘策略
   pi.registerTool({
     name: "forget",
     label: "Forget",
-    description: "Delete a memory by ID and collection name.",
+    description:
+      "Run the agent_learning forgetting strategy. Removes low-importance / stale episodic memories. " +
+      "Strategies: importance_based (default), time_based.",
     parameters: Type.Object({
-      memory_id: Type.String({ description: "Memory ID to delete" }),
-      collection: Type.Optional(Type.String({ description: "Collection: episodic_memory / semantic_memory" })),
+      strategy: Type.Optional(
+        Type.String({ description: "Forgetting strategy: importance_based / time_based" }),
+      ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate) {
       const mem = await ensureMcp();
-      const p = params as { memory_id: string; collection?: string };
-      const result = await callMcpTool(mem, "memory_forget", {
-        memory_id: p.memory_id,
-        collection: p.collection || "episodic_memory",
+      const p = params as { strategy?: string };
+      const result = await callBridge(mem, "memory_forget", {
+        strategy: p.strategy || "importance_based",
       });
       return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        content: [{ type: "text", text: `Forgetting complete: ${JSON.stringify(result)}` }],
         details: {},
       };
     },
   });
 
-  // summarize_session — 压缩工作记忆 → 情景记忆
+  // summarize_session — 压缩 + 固化
   pi.registerTool({
     name: "summarize_session",
     label: "Summarize",
-    description: "Compress current working memory into a concise episodic memory and store it.",
+    description:
+      "Consolidate high-importance episodic memories into semantic memory. " +
+      "Uses agent_learning MemoryManager.consolidate().",
     parameters: Type.Object({
-      title: Type.Optional(Type.String({ description: "Session summary title" })),
+      threshold: Type.Optional(
+        Type.Number({ description: "Minimum importance to consolidate (default 0.5)" }),
+      ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate) {
       const mem = await ensureMcp();
-      const p = params as { title?: string };
-
-      const summary = workingMemory
-        .map((e) => `[${e.role}]: ${e.content.slice(0, 500)}`)
-        .join("\n---\n");
-
-      const result = await callMcpTool(mem, "episodic_store", {
-        content: summary,
-        metadata: {
-          title: p.title || `Session ${Date.now()}`,
-          turn_count: workingMemory.length,
-          compressed_at: new Date().toISOString(),
-        },
+      const p = params as { threshold?: number };
+      const result = await callBridge(mem, "memory_consolidate", {
+        threshold: p.threshold ?? 0.5,
       });
-
       return {
-        content: [{ type: "text", text: `Session summarized and stored: ${JSON.stringify(result)}` }],
+        content: [{ type: "text", text: `Consolidation complete: ${JSON.stringify(result)}` }],
         details: {},
       };
     },
   });
 
-  // memory_stats — 查看记忆统计
+  // memory_stats — 统计信息
   pi.registerTool({
     name: "memory_stats",
     label: "Mem Stats",
-    description: "Get memory collection statistics and working memory size.",
+    description: "Get memory statistics from agent_learning (episodic/semantic counts + working memory size).",
     parameters: Type.Object({}),
     async execute(_toolCallId, _params, _signal, _onUpdate) {
       const mem = await ensureMcp();
-      const stats = await callMcpTool(mem, "memory_stats", {});
+      const stats = await callBridge(mem, "memory_stats", {});
       const result = {
         ...(stats as object),
         working_memory_turns: workingMemory.length,
