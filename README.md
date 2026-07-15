@@ -1,63 +1,103 @@
-# Science Agent (based on Pi Agent)
+# science-pi — 科学计算 Pi Agent
 
-以 [Pi Agent](https://github.com/earendil-works/pi) 为底座的科学计算 AI Agent。
+> 基于 Pi Agent（TypeScript CLI/TUI）底座，
+> 集成 agent_learning 的科学计算、三层记忆、RAG、评估能力。
 
-## 目录结构
+## 项目结构
 
 ```
-agent_workflow/
-├── .pi/
-│   ├── extensions/        # TypeScript 扩展（记忆、RAG、科学计算、MCP、评估）
-│   ├── skills/            # Markdown 技能包（化学/物理解题流程）
-│   └── templates/         # Prompt 模板（compute-verify-output）
-├── python-tools/          # Python 子进程工具（sympy、化学、物理）
-│   ├── requirements.txt
-│   ├── calculator_server.py
-│   ├── chemistry_server.py
-│   ├── physics_server.py
-│   └── verify_server.py
-├── .gitignore
-└── README.md
+.pi/
+├── extensions/
+│   ├── shared/
+│   │   └── mcp-bridge.ts           # 共享 MCP 子进程桥接
+│   ├── science-extension/
+│   │   └── index.ts                # 科学计算：13 个化学/物理工具
+│   ├── memory-extension/
+│   │   └── index.ts                # 三层记忆：remember/recall/forget/summarize
+│   ├── rag-extension/
+│   │   └── index.ts                # RAG：search/ingest/stats/remove
+│   └── evaluation-extension/
+│       └── index.ts                # 评估：metrics/evaluate/stats
+├── skills/
+│   └── scientific-method.md        # 科学解题方法论
+└── templates/
+    └── compute-verify-output.md    # 提示模板
+
+python-tools/
+├── chemistry_server.py             # 化学 MCP 服务器（sympy+mendeleev）
+├── physics_server.py               # 物理 MCP 服务器（sympy+pint）
+├── embedding_server.py             # BGE 嵌入服务器
+├── memory_server.py                # ChromaDB 记忆服务器
+├── rag_server.py                   # RAG 知识库服务器（公式感知分块）
+├── verify_tools.py                 # 验证链工具
+├── science_kb_ingest.py            # 知识库摄入管道
+└── requirements.txt                # Python 依赖
+
+data/
+└── chroma/                         # ChromaDB 持久化数据（自动创建）
 ```
 
 ## 架构
 
 ```
-Pi Agent CLI (底座)
-  ├── 双层 Agent 循环（steering + followUp）
-  ├── 树形会话（JSONL + 分支 + 压缩）
-  ├── 40+ LLM 提供商统一 API
-  └── Extensions 插件系统
-       ├── memory-extension    → 三层记忆（Working/Episodic/Semantic）
-       ├── rag-extension       → RAG 检索（ChromaDB + BGE 嵌入）
-       ├── science-extension   → 科学计算（Python 子进程 sympy/pint）
-       ├── mcp-extension       → MCP 协议工具
-       ├── verify-extension    → 验证链（量纲/数量级/回代）
-       └── eval-extension      → 评估闭环（metrics + LLM Judge）
+┌──────────────────────────────────────────────────────────┐
+│  Pi Agent（CLI / TUI）                                   │
+│  ┌────────────────────────────────────────────────────┐  │
+│  │  双层 Agent 循环（steering + followUp）              │  │
+│  └────────────────────────────────────────────────────┘  │
+│  ┌────────────────────────────────────────────────────┐  │
+│  │  Extension 层                                       │  │
+│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌───────┐ │  │
+│  │  │ Science  │ │ Memory   │ │ RAG      │ │ Eval  │ │  │
+│  │  │ 13 tools │ │ 5 tools  │ │ 4 tools  │ │ 2 tools│ │  │
+│  │  └────┬─────┘ └────┬─────┘ └────┬─────┘ └───┬───┘ │  │
+│  └───────┼────────────┼────────────┼────────────┼─────┘  │
+│          │            │            │            │         │
+│  ┌───────┼────────────┼────────────┼────────────┼─────┐  │
+│  │ MCP Bridge (stdio JSON-RPC)                 │     │  │
+│  └───────┼────────────┼────────────┼────────────┼─────┘  │
+│          ▼            ▼            ▼            ▼         │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐                │
+│  │Chemistry │ │ Physics  │ │ Memory   │                │
+│  │Server.py │ │Server.py │ │Server.py │                │
+│  │sympy     │ │sympy     │ │ChromaDB  │                │
+│  │mendeleev │ │pint      │ │BGE embed │                │
+│  └──────────┘ └──────────┘ └──────────┘                │
+│  ┌──────────┐ ┌──────────┐                             │
+│  │RAG       │ │Embedding │                             │
+│  │Server.py │ │Server.py │                             │
+│  │ChromaDB  │ │BGE-small │                             │
+│  │公式分块  │ │-zh-v1.5  │                             │
+│  └──────────┘ └──────────┘                             │
+│  ┌──────────────────────────────────────────┐          │
+│  │  ChromaDB Persistent (data/chroma/)      │          │
+│  │  ├── episodic_memory                     │          │
+│  │  ├── semantic_memory                     │          │
+│  │  └── science_kb                          │          │
+│  └──────────────────────────────────────────┘          │
+└──────────────────────────────────────────────────────────┘
 ```
 
-## 开发
+## 扩展详情
+
+| 扩展 | 工具数 | Python 后端 | 说明 |
+|------|:---:|------|------|
+| science-extension | 13 | chemistry_server + physics_server | 化学：配平/元素/溶液/pH/热力学/平衡/动力学/电化学；物理：力学/电磁/量子/热力学/光学/误差 |
+| memory-extension | 5 | memory_server | remember/recall/forget/summarize_session/memory_stats；三层记忆 + context hook 注入 |
+| rag-extension | 4 | rag_server | rag_search/rag_ingest/rag_stats/rag_remove；公式感知分块 |
+| evaluation-extension | 2 | (纯TS) | evaluate/eval_stats；turn_end/agent_end/tool_call 钩子 |
+
+## Phase 进度
+
+- [x] **Phase 1** — 项目骨架 + 科学计算
+- [x] **Phase 2** — 记忆 + RAG + 评估
+- [ ] **Phase 3** — MCP 完整协议 + Web API + 前端（可选）
+
+## Git 回退
 
 ```bash
-# 安装 Pi Agent
-npm install -g @earendil-works/pi-coding-agent
-
-# 安装 Python 工具依赖
-cd python-tools && pip install -r requirements.txt
-
-# 启动
-cd /d/agent_workflow && pi
+cd D:\agent_workflow
+git log --oneline                    # 查看历史
+git checkout <commit-hash>           # 回退到任意版本
+git checkout master                  # 回到最新
 ```
-
-## 从 agent_learning 迁移的资产
-
-| 原文件 | 复用方式 |
-|--------|---------|
-| `chemistry_server.py` | → `python-tools/chemistry_server.py`（MCP 子进程） |
-| `physics_server.py` | → `python-tools/physics_server.py`（MCP 子进程） |
-| `verify_tools.py` | → `python-tools/verify_server.py`（MCP 子进程） |
-| `memory/` | → `.pi/extensions/memory-extension/`（TypeScript 重写） |
-| `science_kb_ingest.py` | → `python-tools/science_kb_ingest.py`（保留 Python） |
-| `evaluation/` | → `python-tools/eval_server.py`（保留 Python） |
-| `engine.py` | ❌ 废弃（Pi 的 agent-loop 替代） |
-| `server.py` | ❌ 废弃（Pi CLI 替代） |
