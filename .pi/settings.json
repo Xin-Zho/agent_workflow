@@ -1,0 +1,13 @@
+{
+  "defaultProvider": "ollama",
+  "defaultModel": "qwen2.5:7b",
+  "compaction": {
+    "enabled": true,
+    "reserveTokens": 16384,
+    "keepRecentTokens": 20000
+  },
+  "retry": {
+    "enabled": true,
+    "maxRetries": 3
+  }
+}

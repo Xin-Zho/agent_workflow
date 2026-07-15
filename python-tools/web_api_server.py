@@ -530,6 +530,21 @@ async def websocket_endpoint(ws: WebSocket, token: str = Query(None)):
                 pass
 
 
+# ── Web UI 静态文件 ─────────────────────────────────────────────────
+
+WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "web")
+
+
+@app.get("/", include_in_schema=False)
+async def serve_index():
+    """提供 Web UI 首页。"""
+    index_path = os.path.join(WEB_DIR, "index.html")
+    if os.path.exists(index_path):
+        from fastapi.responses import FileResponse
+        return FileResponse(index_path)
+    return JSONResponse({"error": "Web UI not found. Run from project root."}, status_code=404)
+
+
 # ── 入口 ────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
