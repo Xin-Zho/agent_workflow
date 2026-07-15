@@ -13,7 +13,12 @@ import os
 import asyncio
 
 # 注入 agent_learning 到 Python path，直接复用其成熟实现
-AGENT_LEARNING_ROOT = r"D:\agent_learning"
+# 自动检测平台：WSL 用 /mnt/d，Windows 用 D:\
+import platform
+if platform.system() == "Windows":
+    AGENT_LEARNING_ROOT = r"D:\agent_learning"
+else:
+    AGENT_LEARNING_ROOT = "/mnt/d/agent_learning"
 sys.path.insert(0, AGENT_LEARNING_ROOT)
 os.chdir(AGENT_LEARNING_ROOT)  # MemoryManager 内部用相对路径 data/chroma
 

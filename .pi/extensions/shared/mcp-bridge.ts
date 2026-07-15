@@ -9,6 +9,8 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 
 // ── 类型定义 ───────────────────────────────────────────────────────────
 
@@ -61,10 +63,20 @@ type McpContent = {
 
 /**
  * 创建 MCP 子进程。
- * 注意：Python MCP servers 默认使用 python3，Windows 用 python。
+ * 优先使用项目 venv（.venv/bin/python），回退到系统 python3/python。
  */
 export function createMcpProcess(scriptPath: string, extraEnv?: Record<string, string>): McpProcess {
-  const pythonExe = process.platform === "win32" ? "python" : "python3";
+  // 检测项目 venv
+  const venvPython = join(process.cwd(), ".venv", "bin", "python");
+  const venvPythonWin = join(process.cwd(), ".venv", "Scripts", "python.exe");
+  let pythonExe: string;
+  if (existsSync(venvPython)) {
+    pythonExe = venvPython;
+  } else if (existsSync(venvPythonWin)) {
+    pythonExe = venvPythonWin;
+  } else {
+    pythonExe = process.platform === "win32" ? "python" : "python3";
+  }
   const proc = spawn(pythonExe, [scriptPath], {
     stdio: ["pipe", "pipe", "pipe"],
     env: { ...process.env, PYTHONUNBUFFERED: "1", ...extraEnv },

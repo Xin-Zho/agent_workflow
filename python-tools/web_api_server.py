@@ -5,8 +5,8 @@ agent-workflow Web API Server
 通过 Pi Agent RPC 模式（JSONL over stdin/stdout）提供 HTTP + WebSocket API。
 架构：FastAPI → PiRpcBridge → pi --mode rpc (Node.js subprocess)
 
-启动方式：
-    python web_api_server.py --port 8000
+启动方式（在 WSL 中运行）:
+    cd /mnt/d/agent_workflow/python-tools && python3 web_api_server.py --port 8000
 
 环境变量：
     PI_CLI_PATH    Pi CLI 路径（默认自动查找）
@@ -36,15 +36,21 @@ import uvicorn
 
 PI_CLI_PATH = os.environ.get("PI_CLI_PATH")
 if not PI_CLI_PATH:
-    # 自动查找 Pi CLI（WSL 安装路径）
-    candidates = [
-        "/root/.local/share/pi-node/node-v22.23.1-linux-x64/bin/pi",
-        "/usr/local/bin/pi",
-    ]
-    for c in candidates:
-        if os.path.exists(c):
-            PI_CLI_PATH = c
-            break
+    import shutil
+    # 优先用 PATH 中的 pi 命令
+    pi_in_path = shutil.which("pi")
+    if pi_in_path:
+        PI_CLI_PATH = pi_in_path
+    else:
+        # 回退到已知安装路径
+        candidates = [
+            os.path.expanduser("~/.local/share/pi-node/node-v22.23.1-linux-x64/bin/pi"),
+            "/usr/local/bin/pi",
+        ]
+        for c in candidates:
+            if os.path.exists(c):
+                PI_CLI_PATH = c
+                break
 
 JWT_SECRET = os.environ.get("JWT_SECRET", "dev-secret-change-in-production")
 DEFAULT_PORT = int(os.environ.get("PORT", "8000"))

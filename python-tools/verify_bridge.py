@@ -19,7 +19,12 @@ import time
 # ── 配置 ──
 PYTHON = sys.executable
 TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
-AGENT_LEARNING = r"D:\agent_learning"
+# 自动检测平台
+import platform
+if platform.system() == "Windows":
+    AGENT_LEARNING = r"D:\agent_learning"
+else:
+    AGENT_LEARNING = "/mnt/d/agent_learning"
 
 PASS = "\033[92m✓ PASS\033[0m"
 FAIL = "\033[91m✗ FAIL\033[0m"
