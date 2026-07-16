@@ -74,7 +74,10 @@ export default function (pi: ExtensionAPI) {
 
   // ── 上下文注入：每轮注入相关记忆 ──────────────────────────────────
   pi.on("context", async (_event, ctx) => {
-    const lastUserMsg = getLastUserMessage(ctx.messages);
+    // Pi v0.80+ context 事件可能不传 messages（API 变更）
+    const messages = ctx?.messages;
+    if (!messages || messages.length === 0) return;
+    const lastUserMsg = getLastUserMessage(messages);
 
     // 直接调用 agent_learning 的 get_context_for_prompt
     if (lastUserMsg && mcp) {
@@ -94,15 +97,14 @@ export default function (pi: ExtensionAPI) {
 
   // ── 跟踪对话，写入 Working Memory ─────────────────────────────────
   pi.on("turn_end", (_event, ctx) => {
-    const msgs = ctx.messages;
-    if (msgs.length > 0) {
-      const last = msgs[msgs.length - 1];
-      if (last.role === "user" || last.role === "assistant") {
-        addWorkingMemory(
-          last.role as "user" | "assistant",
-          typeof last.content === "string" ? last.content : JSON.stringify(last.content),
-        );
-      }
+    const msgs = ctx?.messages;
+    if (!msgs || msgs.length === 0) return;
+    const last = msgs[msgs.length - 1];
+    if (last.role === "user" || last.role === "assistant") {
+      addWorkingMemory(
+        last.role as "user" | "assistant",
+        typeof last.content === "string" ? last.content : JSON.stringify(last.content),
+      );
     }
   });
 

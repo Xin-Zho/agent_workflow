@@ -107,7 +107,8 @@ export default function (pi: ExtensionAPI) {
     if (!currentMetrics) return;
     currentMetrics.turnCount++;
 
-    const msgs = ctx.messages;
+    const msgs = ctx?.messages;
+    if (!msgs || msgs.length === 0) return;
     const last = msgs[msgs.length - 1];
     if (!last) return;
 

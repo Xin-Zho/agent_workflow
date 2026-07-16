@@ -66,16 +66,26 @@ type McpContent = {
  * 优先使用项目 venv（.venv/bin/python），回退到系统 python3/python。
  */
 export function createMcpProcess(scriptPath: string, extraEnv?: Record<string, string>): McpProcess {
-  // 检测项目 venv
-  const venvPython = join(process.cwd(), ".venv", "bin", "python");
-  const venvPythonWin = join(process.cwd(), ".venv", "Scripts", "python.exe");
   let pythonExe: string;
-  if (existsSync(venvPython)) {
-    pythonExe = venvPython;
-  } else if (existsSync(venvPythonWin)) {
-    pythonExe = venvPythonWin;
+
+  // WSL: 使用 Windows Python（通过 WSL interop，不依赖 WSL venv）
+  // agent_learning 的所有依赖（sympy/chromadb/torch 等）已在 Windows Python 中安装
+  if (process.platform === "linux") {
+    // 必须用完整路径：避免 Git Bash / PATH 中的 WorkBuddy 托管 Python（3.13.12，无包）
+    pythonExe = "/mnt/c/Users/Administrator/AppData/Local/Programs/Python/Python313/python.exe";
+    // Windows Python 不认识 /mnt/d/... 路径，转换为 D:\...
+    scriptPath = scriptPath.replace(/^\/mnt\/([a-z])\//i, (_, d) => `${d.toUpperCase()}:\\`);
   } else {
-    pythonExe = process.platform === "win32" ? "python" : "python3";
+    // 非 WSL 场景：尝试项目 venv，回退到系统 python
+    const venvPython = join(process.cwd(), ".venv", "bin", "python");
+    const venvPythonWin = join(process.cwd(), ".venv", "Scripts", "python.exe");
+    if (existsSync(venvPython)) {
+      pythonExe = venvPython;
+    } else if (existsSync(venvPythonWin)) {
+      pythonExe = venvPythonWin;
+    } else {
+      pythonExe = "python";
+    }
   }
   const proc = spawn(pythonExe, [scriptPath], {
     stdio: ["pipe", "pipe", "pipe"],
@@ -128,7 +138,120 @@ export function createMcpProcess(scriptPath: string, extraEnv?: Record<string, s
   return mcp;
 }
 
+// ── 路径白名单（沙箱）─────────────────────────────────────────────────
+
+class BlockedPathError extends Error {
+  constructor(
+    message: string,
+    public blockedPaths: string[],
+  ) {
+    super(message);
+    this.name = "BlockedPathError";
+  }
+}
+
+/** 终端交互确认：越权路径提请用户审批 */
+async function requestConfirmation(paths: string[]): Promise<boolean> {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = await new Promise<string>((resolve) => {
+      rl.question(
+        `\n⚠️  以下路径超出白名单:\n${paths.map((p) => `  ${p}`).join("\n")}\n\n允许本次访问? [y/N] `,
+        resolve,
+      );
+    });
+    return answer.toLowerCase() === "y" || answer.toLowerCase() === "yes";
+  } finally {
+    rl.close();
+  }
+}
+
+/** 允许 Python 工具读写的目录。越权调用的路径会被直接拦截。 */
+const ALLOWED_ROOTS = [
+  "D:\\agent_workflow",
+  "D:\\agent_learning",
+] as const;
+
+function getAllowRoots(): string[] {
+  // 临时放行：PI_ALLOW_ROOTS=D:\downloads;E:\temp
+  const extra = process.env.PI_ALLOW_ROOTS;
+  if (!extra) return [...ALLOWED_ROOTS];
+  return [
+    ...ALLOWED_ROOTS,
+    ...extra.split(";").map((s) => s.trim()).filter(Boolean),
+  ];
+}
+
+/**
+ * 递归扫描参数中所有的字符串值。
+ * 如果发现绝对路径且不在白名单内，直接抛错。
+ *
+ * 支持两种路径格式：
+ *   Windows: D:\foo\bar
+ *   WSL:     /mnt/d/foo/bar（自动转为 Windows 路径再校验）
+ */
+function validatePaths(obj: unknown, context: string): void {
+  const blocked: string[] = [];
+  _validate(obj, context, blocked);
+  if (blocked.length > 0) {
+    throw new BlockedPathError(
+      `[路径越权] ${context}\n` +
+      `  白名单: ${getAllowRoots().join(", ")}\n` +
+      `  临时放行: PI_ALLOW_ROOTS="D:\\foo;E:\\bar" pi\n` +
+      `  非交互:   PI_NO_CONFIRM=1 pi`,
+      blocked,
+    );
+  }
+}
+
+function _validate(obj: unknown, context: string, blocked: string[]): void {
+  if (obj === null || obj === undefined) return;
+
+  if (typeof obj === "string") {
+    // 优先处理 WSL 路径 → Windows 路径
+    let normalized = obj;
+    const mntMatch = obj.match(/^\/mnt\/([a-z])(\/.+)$/i);
+    if (mntMatch) {
+      normalized = `${mntMatch[1].toUpperCase()}:${mntMatch[2].replace(/\//g, "\\")}`;
+    }
+
+    // 仅校验绝对路径（跳过相对路径、URL、纯数值/标识符）
+    const winAbs = normalized.match(/^[A-Z]:\\/);
+    const unixAbs = normalized.match(/^\/(?!mnt\/)/); // 严格 Unix 绝对路径（非 /mnt/）
+    if ((winAbs || unixAbs) && !isAllowed(normalized)) {
+      blocked.push(obj);
+    }
+  } else if (Array.isArray(obj)) {
+    for (const item of obj) _validate(item, context, blocked);
+  } else if (typeof obj === "object") {
+    for (const [key, value] of Object.entries(obj)) {
+      _validate(value, `${context}.${key}`, blocked);
+    }
+  }
+}
+
+function isAllowed(normalized: string): boolean {
+  const lower = normalized.toLowerCase();
+  return getAllowRoots().some((root) => lower.startsWith(root.toLowerCase()));
+}
+
 // ── MCP 协议方法 ───────────────────────────────────────────────────────
+
+/**
+ * 异步版路径校验：越权时请求用户确认，拒绝则抛错。
+ * 若 PI_NO_CONFIRM=1 则直接拒绝（非交互模式）。
+ */
+async function validatePathsAsync(obj: unknown, context: string): Promise<void> {
+  try {
+    validatePaths(obj, context);
+  } catch (err) {
+    if (!(err instanceof BlockedPathError)) throw err;
+    if (process.env.PI_NO_CONFIRM === "1") throw err;
+    const approved = await requestConfirmation(err.blockedPaths);
+    if (!approved) throw err;
+    // 用户确认放行，不做二次拦截
+  }
+}
 
 function sendRequest(mcp: McpProcess, method: string, params: Record<string, unknown> = {}): number {
   const id = mcp.requestId++;
@@ -173,7 +296,7 @@ export async function initMcpServer(mcp: McpProcess): Promise<McpToolDef[]> {
 }
 
 /**
- * 调用 MCP 工具（tools/call）。
+ * 调用 MCP 工具（tools/call），含路径白名单校验 + 用户确认。
  *
  * 自动解析标准 MCP 响应格式：
  *   result.content[].text → json.loads() → 返回 Python dict
@@ -186,6 +309,8 @@ export async function callMcpTool(
   args: Record<string, unknown>,
   timeoutMs = 60000,
 ): Promise<unknown> {
+  // 路径白名单校验（越权则请求用户确认）
+  await validatePathsAsync(args, `MCP tool "${toolName}" args`);
   const id = sendRequest(mcp, "tools/call", { name: toolName, arguments: args });
   const result = (await awaitResponse(mcp, id, timeoutMs)) as McpToolCallResult;
 
@@ -232,12 +357,14 @@ export function killMcpProcess(mcp: McpProcess): void {
  * 与 MCP 协议不同——不走 tools/list / tools/call，
  * 而是直接按 method name 分发到 Python handler。
  */
-export function callBridge(
+export async function callBridge(
   mcp: McpProcess,
   method: string,
   params: Record<string, unknown>,
   timeoutMs = 60000,
 ): Promise<unknown> {
+  // 路径白名单校验（越权则请求用户确认）
+  await validatePathsAsync(params, `Bridge method "${method}" params`);
   const id = mcp.requestId++;
   const request = JSON.stringify({ id, method, params });
   mcp.proc.stdin!.write(request + "\n");
