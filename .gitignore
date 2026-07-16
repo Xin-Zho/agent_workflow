@@ -1,0 +1,14 @@
+node_modules/
+__pycache__/
+*.pyc
+.env
+.venv/
+.pi/bin/
+.pi/agent/sessions/
+.pi/agent/auth.json
+.pi/agent/models.json
+.pi/agent/settings.json
+dist/
+*.egg-info/
+.pytest_cache/
+chroma_data/

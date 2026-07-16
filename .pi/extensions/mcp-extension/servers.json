@@ -1,0 +1,14 @@
+{
+  "servers": {
+    "chemistry": {
+      "command": ["python3", "python-tools/chemistry_server.py"],
+      "env": { "PYTHONUNBUFFERED": "1" },
+      "enabled": true
+    },
+    "physics": {
+      "command": ["python3", "python-tools/physics_server.py"],
+      "env": { "PYTHONUNBUFFERED": "1" },
+      "enabled": true
+    }
+  }
+}

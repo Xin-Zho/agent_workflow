@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>科学计算 Agent</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/marked@9.1.6/marked.min.js"></script>
+  <style>
+    :root {
+      --bg: #1a1b26;
+      --bg-elevated: #24283b;
+      --bg-input: #1f2335;
+      --text: #c0caf5;
+      --text-dim: #565f89;
+      --accent: #7aa2f7;
+      --accent-hover: #89b4fa;
+      --green: #9ece6a;
+      --red: #f7768e;
+      --yellow: #e0af68;
+      --border: #2a2e44;
+      --radius: 12px;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, "Segoe UI", "Noto Sans SC", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    /* Header */
+    header {
+      padding: 12px 20px;
+      background: var(--bg-elevated);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    header h1 {
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--accent);
+    }
+    .status-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--text-dim);
+      transition: background 0.3s;
+    }
+    .status-dot.connected { background: var(--green); }
+    .status-dot.connecting { background: var(--yellow); animation: pulse 1s infinite; }
+    .status-dot.error { background: var(--red); }
+    @keyframes pulse { 50% { opacity: 0.4; } }
+    .session-id {
+      margin-left: auto;
+      font-size: 12px;
+      color: var(--text-dim);
+      font-family: monospace;
+    }
+    /* Chat area */
+    #chat {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .msg {
+      max-width: 80%;
+      padding: 12px 16px;
+      border-radius: var(--radius);
+      line-height: 1.6;
+      font-size: 14px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .msg.user {
+      align-self: flex-end;
+      background: var(--accent);
+      color: #1a1b26;
+    }
+    .msg.assistant {
+      align-self: flex-start;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+    }
+    .msg.assistant p { margin: 4px 0; }
+    .msg.assistant code {
+      background: var(--bg-input);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 13px;
+    }
+    .msg.assistant pre {
+      background: var(--bg-input);
+      padding: 12px;
+      border-radius: 8px;
+      overflow-x: auto;
+      margin: 8px 0;
+    }
+    .msg.assistant pre code {
+      background: none;
+      padding: 0;
+    }
+    .msg.tool-call {
+      align-self: flex-start;
+      background: transparent;
+      border: 1px dashed var(--border);
+      font-size: 12px;
+      color: var(--text-dim);
+      font-family: monospace;
+    }
+    .typing-indicator {
+      align-self: flex-start;
+      color: var(--text-dim);
+      font-size: 13px;
+      padding: 8px 16px;
+    }
+    .typing-indicator span {
+      display: inline-block;
+      animation: blink 1.4s infinite;
+    }
+    .typing-indicator span:nth-child(2) { animation-delay: 0.2s; }
+    .typing-indicator span:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes blink { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
+    /* Input */
+    #input-bar {
+      padding: 16px 20px;
+      background: var(--bg-elevated);
+      border-top: 1px solid var(--border);
+      display: flex;
+      gap: 12px;
+    }
+    #msg-input {
+      flex: 1;
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px 16px;
+      color: var(--text);
+      font-size: 14px;
+      font-family: inherit;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    #msg-input:focus { border-color: var(--accent); }
+    #msg-input::placeholder { color: var(--text-dim); }
+    #send-btn {
+      background: var(--accent);
+      color: #1a1b26;
+      border: none;
+      border-radius: var(--radius);
+      padding: 0 24px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    #send-btn:hover { background: var(--accent-hover); }
+    #send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    /* Auth overlay */
+    #auth-overlay {
+      position: fixed;
+      inset: 0;
+      background: var(--bg);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+    }
+    .auth-card {
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 32px;
+      width: 360px;
+    }
+    .auth-card h2 {
+      color: var(--accent);
+      font-size: 18px;
+      margin-bottom: 16px;
+    }
+    .auth-card input {
+      width: 100%;
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 14px;
+      color: var(--text);
+      font-size: 14px;
+      margin-bottom: 12px;
+      outline: none;
+    }
+    .auth-card input:focus { border-color: var(--accent); }
+    .auth-card button {
+      width: 100%;
+      background: var(--accent);
+      color: #1a1b26;
+      border: none;
+      border-radius: 8px;
+      padding: 10px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .auth-card button:hover { background: var(--accent-hover); }
+    .auth-hint {
+      font-size: 12px;
+      color: var(--text-dim);
+      margin-top: 8px;
+    }
+    /* Scrollbar */
+    #chat::-webkit-scrollbar { width: 6px; }
+    #chat::-webkit-scrollbar-track { background: transparent; }
+    #chat::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  </style>
+</head>
+<body>
+
+<!-- Auth -->
+<div id="auth-overlay">
+  <div class="auth-card">
+    <h2>科学计算 Agent</h2>
+    <input id="api-key" type="password" placeholder="API Key (sk-xxx) 或 JWT Token" value="sk-dev">
+    <button onclick="connect()">连接</button>
+    <p class="auth-hint">开发模式: 直接用 sk-dev 即可连接</p>
+  </div>
+</div>
+
+<!-- Header -->
+<header>
+  <div class="status-dot" id="status-dot"></div>
+  <h1>科学计算 Agent</h1>
+  <span class="session-id" id="session-id"></span>
+</header>
+
+<!-- Chat -->
+<div id="chat"></div>
+
+<!-- Input -->
+<div id="input-bar">
+  <input id="msg-input" type="text" placeholder="输入科学问题... (Enter 发送)" onkeydown="if(event.key==='Enter')send()">
+  <button id="send-btn" onclick="send()">发送</button>
+</div>
+
+<script>
+let ws = null;
+let isStreaming = false;
+let currentAssistantMsg = null;
+let currentAssistantRaw = "";
+
+const API_BASE = window.location.origin;
+
+function setStatus(state) {
+  const dot = document.getElementById('status-dot');
+  dot.className = 'status-dot ' + state;
+}
+
+async function connect() {
+  const apiKey = document.getElementById('api-key').value.trim();
+  if (!apiKey) return;
+
+  setStatus('connecting');
+
+  // 先验证 token
+  try {
+    const resp = await fetch(API_BASE + '/api/health');
+    if (!resp.ok) throw new Error('Server not reachable');
+  } catch (e) {
+    setStatus('error');
+    alert('无法连接到服务器，请确保 web_api_server.py 正在运行');
+    return;
+  }
+
+  // 连接 WebSocket
+  const wsUrl = API_BASE.replace('http', 'ws') + '/ws?token=' + encodeURIComponent(apiKey);
+  ws = new WebSocket(wsUrl);
+
+  ws.onopen = () => {
+    setStatus('connected');
+    document.getElementById('auth-overlay').style.display = 'none';
+    document.getElementById('msg-input').focus();
+  };
+
+  ws.onmessage = (event) => {
+    handleWsMessage(JSON.parse(event.data));
+  };
+
+  ws.onerror = () => {
+    setStatus('error');
+  };
+
+  ws.onclose = () => {
+    setStatus('error');
+    if (isStreaming) {
+      isStreaming = false;
+      document.getElementById('send-btn').disabled = false;
+    }
+  };
+}
+
+function handleWsMessage(msg) {
+  const type = msg.type || '';
+
+  if (type === 'text_delta') {
+    // 流式文本
+    if (!currentAssistantMsg) {
+      currentAssistantMsg = addMessage('', 'assistant');
+      currentAssistantRaw = "";
+    }
+    currentAssistantRaw += msg.text || msg.data?.text || '';
+    renderMarkdown(currentAssistantMsg, currentAssistantRaw);
+    scrollBottom();
+  } else if (type === 'tool_call') {
+    // 工具调用
+    addToolCall(msg.tool_name || msg.data?.tool_name, msg.args || msg.data?.args);
+  } else if (type === 'tool_result') {
+    addToolCall('result: ' + (msg.tool_name || ''), JSON.stringify(msg.result || msg.data?.result).slice(0, 200));
+  } else if (type === 'agent_settled') {
+    // 回合结束
+    isStreaming = false;
+    document.getElementById('send-btn').disabled = false;
+    currentAssistantMsg = null;
+    currentAssistantRaw = "";
+    if (msg.session_id) {
+      document.getElementById('session-id').textContent = 'session: ' + msg.session_id.slice(0, 8);
+    }
+  } else if (type === 'error') {
+    addMessage('❌ ' + (msg.message || msg.error || 'Unknown error'), 'assistant');
+    isStreaming = false;
+    document.getElementById('send-btn').disabled = false;
+  }
+}
+
+function send() {
+  const input = document.getElementById('msg-input');
+  const text = input.value.trim();
+  if (!text || !ws || ws.readyState !== WebSocket.OPEN || isStreaming) return;
+
+  addMessage(text, 'user');
+  ws.send(JSON.stringify({ type: 'prompt', message: text }));
+
+  isStreaming = true;
+  document.getElementById('send-btn').disabled = true;
+  input.value = '';
+
+  // 添加 typing indicator
+  const typing = document.createElement('div');
+  typing.className = 'typing-indicator';
+  typing.id = 'typing';
+  typing.innerHTML = '<span>●</span><span>●</span><span>●</span>';
+  document.getElementById('chat').appendChild(typing);
+  scrollBottom();
+}
+
+function addMessage(text, role) {
+  removeTyping();
+  const div = document.createElement('div');
+  div.className = 'msg ' + role;
+  if (role === 'user') {
+    div.textContent = text;
+  } else {
+    renderMarkdown(div, text);
+  }
+  document.getElementById('chat').appendChild(div);
+  scrollBottom();
+  return div;
+}
+
+function addToolCall(name, args) {
+  removeTyping();
+  const div = document.createElement('div');
+  div.className = 'msg tool-call';
+  div.textContent = '🔧 ' + name + (args ? ' (' + (typeof args === 'string' ? args : JSON.stringify(args)).slice(0, 100) + ')' : '');
+  document.getElementById('chat').appendChild(div);
+  scrollBottom();
+}
+
+function renderMarkdown(el, text) {
+  if (typeof marked !== 'undefined') {
+    el.innerHTML = marked.parse(text);
+    if (typeof renderMathInElement !== 'undefined') {
+      renderMathInElement(el, {
+        delimiters: [
+          { left: '$$', right: '$$', display: true },
+          { left: '$', right: '$', display: false },
+        ],
+        throwOnError: false,
+      });
+    }
+  } else {
+    el.textContent = text;
+  }
+}
+
+function removeTyping() {
+  const t = document.getElementById('typing');
+  if (t) t.remove();
+}
+
+function scrollBottom() {
+  const chat = document.getElementById('chat');
+  chat.scrollTop = chat.scrollHeight;
+}
+</script>
+</body>
+</html>
