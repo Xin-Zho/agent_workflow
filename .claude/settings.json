@@ -1,38 +1,13 @@
 {
   "permissions": {
-    "allow": [
-      "Read",
-      "Glob",
-      "Grep",
-      "WebSearch",
-      "WebFetch",
-      "Task",
-      "Bash(git *)",
-      "Bash(python *)",
-      "Bash(python3 *)",
-      "Bash(pytest *)",
-      "Bash(ls *)",
-      "Bash(find *)",
-      "Bash(cat *)",
-      "Bash(echo *)",
-      "Bash(cd *)",
-      "Bash(mkdir *)",
-      "Bash(npm *)",
-      "Bash(npx *)",
-      "Bash(pip *)",
-      "Bash(chmod *)",
-      "Bash(which *)",
-      "Bash(wc *)",
-      "Bash(head *)",
-      "Bash(tail *)",
-      "Bash(date *)",
-      "Bash(env *)",
-      "Bash(pwd *)",
-      "Bash(uname *)",
-      "Bash(timeout *)",
-      "Bash(true *)",
-      "Bash(false *)",
-      "Bash(jq *)"
+    "defaultMode": "dontAsk",
+    "deny": [
+      "Bash(rm -rf *)",
+      "Bash(git push --force *)",
+      "Bash(git push -f *)",
+      "Bash(shutdown *)",
+      "Bash(reboot *)",
+      "Bash(:(){ :|:& };:)"
     ]
   }
 }
