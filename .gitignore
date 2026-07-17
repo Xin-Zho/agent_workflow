@@ -2,7 +2,7 @@ node_modules/
 __pycache__/
 *.pyc
 .env
-.venv/
+.venv
 .pi/bin/
 .pi/agent/sessions/
 .pi/agent/auth.json
@@ -12,3 +12,6 @@ dist/
 *.egg-info/
 .pytest_cache/
 chroma_data/
+data/*.db
+data/*.db-shm
+data/*.db-wal

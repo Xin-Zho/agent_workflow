@@ -1,10 +1,21 @@
-# Agent Workflow — Scientific Computing Agent
+# Agent Workflow — Material Science Research Agent
 
 ## Project Overview
 
-This project extends Pi Agent (by earendil-works) with scientific computing capabilities,
-bridging the mature Python-based computation stack from `agent_learning` into Pi's
-TypeScript extension system.
+This project extends Pi Agent with a persistent material-science literature workflow.
+The main product path is target performance → structure → laboratory-feasible process
+system → composition/ratio. Scientific computing and the `agent_learning` bridge are
+supporting capabilities.
+
+## Workflow invariants
+
+- Abstract screening must stop at `WAITING_PAPER_APPROVAL` for user confirmation.
+- Full-text extractions must stop at `WAITING_DATA_REVIEW` for owner/admin review.
+- Abstract-only claims are low-evidence and cannot be promoted as full-text facts.
+- Store original and normalized units/ratio bases; never normalize before comparability checks.
+- A paper failure degrades independently and must not block the task.
+- Keep user sessions isolated; only reviewed objective knowledge is shared.
+- Preserve extraction versions and audit events.
 
 ## Architecture
 
@@ -25,12 +36,15 @@ Pi Agent (TypeScript, CLI/TUI)
 - **ChromaDB data**: `D:\agent_learning\data\chroma` (shared instance)
 - **Python tools**: `./python-tools/` (MCP servers, bridge scripts)
 - **Web API**: `./python-tools/web_api_server.py` (FastAPI + Pi RPC bridge)
+- **Workflow core**: `./python-tools/workflow_engine.py` (SQLite state machine + FIFO)
+- **Workflow routes**: `./python-tools/workflow_api.py` (`/api/research/*`)
+- **Workflow database**: `./data/workflow.db` (override with `WORKFLOW_DB_PATH`)
 
 ## Dependencies
 
 - Pi Agent installed in WSL (`pi` command available)
 - Python 3.13+ with: sympy, pint, mendeleev, mcp, chromadb, fastapi, uvicorn
-- Ollama running locally with qwen2.5:7b model
+- Ollama or another Pi-supported local inference server
 - agent_learning project at `D:\agent_learning` (for MemoryManager and RAG)
 
 ## Usage
@@ -46,4 +60,9 @@ pi
 cd python-tools
 python web_api_server.py --port 8000
 # Then open http://localhost:8000 in browser
+```
+
+### Workflow tests
+```bash
+python3 -m unittest discover -s tests -v
 ```

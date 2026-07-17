@@ -10,7 +10,9 @@ agent-workflow Web API Server
 
 环境变量：
     PI_CLI_PATH    Pi CLI 路径（默认自动查找）
-    JWT_SECRET     JWT 签名密钥（默认 dev-secret）
+    JWT_SECRET     JWT 签名密钥（生产环境必须设置）
+    DEV_API_KEY    本地开发 API Key（默认 sk-dev，不应暴露到公网）
+    WORKFLOW_DB_PATH 研究工作流 SQLite 数据库路径
 """
 
 import asyncio
@@ -53,6 +55,7 @@ if not PI_CLI_PATH:
                 break
 
 JWT_SECRET = os.environ.get("JWT_SECRET", "dev-secret-change-in-production")
+DEV_API_KEY = os.environ.get("DEV_API_KEY", "sk-dev")
 DEFAULT_PORT = int(os.environ.get("PORT", "8000"))
 
 
@@ -271,8 +274,8 @@ class PiRpcBridge:
 
 app = FastAPI(
     title="Agent Workflow API",
-    description="Scientific Computing Agent — HTTP + WebSocket API",
-    version="1.0.0",
+    description="Material Science Research Workflow + Pi Agent API",
+    version="1.1.0",
 )
 
 app.add_middleware(
@@ -291,13 +294,15 @@ bridge: PiRpcBridge | None = None
 async def startup():
     global bridge
     if not PI_CLI_PATH:
-        raise RuntimeError(
-            "Pi CLI not found. Set PI_CLI_PATH env var or install pi-agent.\n"
-            "  npm install -g @earendil-works/pi-coding-agent"
-        )
+        print("[startup] Pi CLI not found; research workflow API remains available")
+        return
     bridge = PiRpcBridge(PI_CLI_PATH)
-    await bridge.start()
-    print(f"[startup] Pi RPC bridge started (CLI: {PI_CLI_PATH})")
+    try:
+        await bridge.start()
+        print(f"[startup] Pi RPC bridge started (CLI: {PI_CLI_PATH})")
+    except Exception as exc:
+        bridge = None
+        print(f"[startup] Pi RPC unavailable; workflow-only mode: {exc}")
 
 
 @app.on_event("shutdown")
@@ -323,8 +328,8 @@ async def auth_required(authorization: str = Header(None)) -> dict:
             raise HTTPException(status_code=401, detail="Invalid or expired token")
         return payload
 
-    # 开发模式：API Key
-    if authorization.startswith("sk-"):
+    # 本地开发模式：只接受显式配置的 API Key，不能接受任意 sk-*。
+    if hmac.compare_digest(authorization, DEV_API_KEY):
         return {"sub": "dev-user", "auth_method": "api_key"}
 
     raise HTTPException(status_code=401, detail="Invalid authorization format")
@@ -343,12 +348,22 @@ class TokenRequest(BaseModel):
     expires_hours: int = 24
 
 
+# 研究工作流路由独立于 Pi 进程，即使模型服务暂时不可用也能管理任务。
+from workflow_api import create_workflow_router
+app.include_router(create_workflow_router(auth_required))
+
+
 # ── API 路由 ────────────────────────────────────────────────────────
 
 @app.get("/api/health")
 async def health():
     """健康检查。"""
-    return {"status": "ok", "pi_cli": PI_CLI_PATH}
+    return {
+        "status": "ok",
+        "pi_cli": PI_CLI_PATH,
+        "pi_ready": bool(bridge and bridge.proc),
+        "workflow_ready": True,
+    }
 
 
 @app.post("/api/auth/token")
@@ -478,7 +493,7 @@ async def websocket_endpoint(ws: WebSocket, token: str = Query(None)):
         return
 
     payload = verify_token(token)
-    if not payload and not token.startswith("sk-"):
+    if not payload and not hmac.compare_digest(token, DEV_API_KEY):
         await ws.close(code=4001, reason="Invalid token")
         return
 

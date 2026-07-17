@@ -1,8 +1,11 @@
-# science-pi — 科学计算 Pi Agent
+# agent_workflow — 材料科学文献研究工作流
 
-> 基于 Pi Agent（TypeScript CLI/TUI）底座，
-> 集成 agent_learning 的科学计算、三层记忆、RAG、评估能力。
-> 记忆/RAG 直接桥接 agent_learning 成熟实现，共享 ChromaDB 实例。
+> 基于 Pi Agent 的可恢复研究任务系统。从目标性能出发，逐层检索候选结构、
+> 实验室可执行工艺体系及成分配比，并通过两个人工审批节点建立可信共享知识库。
+
+当前版本新增了独立于模型进程的 SQLite 工作流核心：任务状态、论文候选、
+提取版本、人工审核、暂停/恢复/回退、审计事件及 FIFO 队列均可持久化。
+原有科学计算、三层记忆、RAG 和评估能力继续作为辅助工具。
 
 ## 快速开始
 
@@ -19,11 +22,33 @@ python verify_bridge.py
 cd /d/agent_workflow
 wsl pi
 
-# 3b. Web API 模式
+# 3b. Web API 模式（Pi 不在线时研究任务 API 仍可使用）
 cd python-tools
 python web_api_server.py --port 8000
 # 浏览器打开 http://localhost:8000
 ```
+
+研究工作流 API 说明见 [`docs/research-workflow-api.md`](docs/research-workflow-api.md)。
+
+## 第一版研究流程
+
+```text
+任务澄清
+→ 目标性能/结构/工艺/配方检索
+→ 规则过滤
+→ 嵌入召回与重排
+→ 摘要候选列表
+→ 用户确认
+→ 全文解析与深读
+→ 配方/工艺/性能提取
+→ 可比性与证据检查
+→ 综述和实验点
+→ 人工审核
+→ 共享知识库
+```
+
+默认优先最近五年文献并保留奠基工作，支持中英文。摘要分析始终标记为
+低证据等级；只有任务发起者或管理员审核通过的全文提取结果才能进入共享库。
 
 ## 项目结构
 
@@ -52,6 +77,8 @@ D:\agent_workflow\
 │       └── compute-verify-output.md   # 提示模板（/compute-verify-output）
 ├── python-tools/
 │   ├── web_api_server.py              # FastAPI + Pi RPC Bridge (552行)
+│   ├── workflow_engine.py              # 研究状态机、SQLite、FIFO与审计
+│   ├── workflow_api.py                 # /api/research/* 路由
 │   ├── agent_learning_bridge.py       # 统一桥接（复用 agent_learning 记忆/RAG）
 │   ├── verify_bridge.py               # ★ Phase 4 — 桥接验证脚本
 │   ├── chemistry_server.py            # 化学 MCP 服务器（sympy+mendeleev）
@@ -64,6 +91,8 @@ D:\agent_workflow\
 │   └── index.html                     # ★ Phase 4 — Web UI（单文件，KaTeX+Markdown）
 ├── AGENTS.md                          # ★ Phase 4 — 项目上下文（Pi 自动发现）
 ├── setup.sh                           # ★ Phase 4 — 环境初始化脚本
+├── tests/test_workflow_engine.py       # 工作流核心单元测试
+├── docs/research-workflow-api.md       # API与队列契约
 └── README.md
 ```
 

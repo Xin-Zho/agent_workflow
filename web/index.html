@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>科学计算 Agent</title>
+  <title>材料研究 Agent</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
   <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
@@ -225,7 +225,7 @@
 <!-- Auth -->
 <div id="auth-overlay">
   <div class="auth-card">
-    <h2>科学计算 Agent</h2>
+    <h2>材料研究 Agent</h2>
     <input id="api-key" type="password" placeholder="API Key (sk-xxx) 或 JWT Token" value="sk-dev">
     <button onclick="connect()">连接</button>
     <p class="auth-hint">开发模式: 直接用 sk-dev 即可连接</p>
@@ -235,7 +235,7 @@
 <!-- Header -->
 <header>
   <div class="status-dot" id="status-dot"></div>
-  <h1>科学计算 Agent</h1>
+  <h1>材料研究 Agent</h1>
   <span class="session-id" id="session-id"></span>
 </header>
 
@@ -244,7 +244,7 @@
 
 <!-- Input -->
 <div id="input-bar">
-  <input id="msg-input" type="text" placeholder="输入科学问题... (Enter 发送)" onkeydown="if(event.key==='Enter')send()">
+  <input id="msg-input" type="text" placeholder="输入材料研究目标... (Enter 发送)" onkeydown="if(event.key==='Enter')send()">
   <button id="send-btn" onclick="send()">发送</button>
 </div>
 
