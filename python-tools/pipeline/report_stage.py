@@ -3,13 +3,14 @@
 import json
 import os
 
-from workflow_engine import WorkflowStore
+from workflow_engine import WorkerContext, WorkflowStore
 from artifact_utils import atomic_write_unique
 from pipeline.contracts import AgentAdapter
 from workflow_models import TaskDefinition, SampleExtraction
 
 
 async def run_report_stage(
+    ctx: WorkerContext,
     job: dict,
     store: WorkflowStore,
     agent: AgentAdapter,
@@ -22,11 +23,11 @@ async def run_report_stage(
     WAITING_DATA_REVIEW.
     """
     task_id = job["task_id"]
-    task = store.get_task(task_id, "worker")
+    task = store.get_task_for_worker(ctx)
     definition = TaskDefinition(**task["definition"])
 
     # Load all current extractions
-    extraction_rows = store.list_extractions(task_id, "worker")
+    extraction_rows = store.list_extractions_for_worker(ctx)
     extractions: list[SampleExtraction] = []
     for ext in extraction_rows:
         payload = ext.get("payload", {})
@@ -57,7 +58,7 @@ async def run_report_stage(
     store.record_report(task_id, report_path, format="markdown")
 
     # Transition to WAITING_DATA_REVIEW (human review gate)
-    store.request_data_review(task_id, "worker")
+    store.request_data_review_for_worker(ctx)
 
     return {
         "report_path": report_path,

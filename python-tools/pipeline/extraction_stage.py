@@ -3,12 +3,13 @@
 import json
 import os
 
-from workflow_engine import WorkflowStore
+from workflow_engine import WorkerContext, WorkflowStore
 from pipeline.contracts import AgentAdapter
 from workflow_models import TaskDefinition, ParsedDocument, SampleExtraction
 
 
 async def run_extraction_stage(
+    ctx: WorkerContext,
     job: dict,
     store: WorkflowStore,
     agent: AgentAdapter,
@@ -17,18 +18,18 @@ async def run_extraction_stage(
 
     For each parsed paper, loads the ParsedDocument from its JSON artifact,
     delegates to AgentAdapter.extract_paper(), and records each
-    SampleExtraction via store.record_extraction(). Advances the task to
-    VALIDATING when complete.
+    SampleExtraction via store.record_extraction_for_worker(). Advances the
+    task to VALIDATING when complete.
     """
     task_id = job["task_id"]
-    task = store.get_task(task_id, "worker")
+    task = store.get_task_for_worker(ctx)
     definition = TaskDefinition(**task["definition"])
 
-    papers = store.list_papers(task_id, "worker")
+    papers = store.list_papers_for_worker(ctx)
     parsed_papers = [p for p in papers if p.get("paper_status") == "parsed"]
 
     if not parsed_papers:
-        store.advance(task_id, "worker", "VALIDATING")
+        store.advance_for_worker(ctx, "VALIDATING")
         return {"extracted": 0}
 
     # Retrieve cached parsed_document artifacts
@@ -54,9 +55,8 @@ async def run_extraction_stage(
 
             for sample_extraction in extractions:
                 payload = sample_extraction.model_dump()
-                store.record_extraction(
-                    task_id=task_id,
-                    actor_id="worker",
+                store.record_extraction_for_worker(
+                    ctx,
                     paper_id=paper["id"],
                     payload=payload,
                     source_type="explicit",
@@ -71,5 +71,5 @@ async def run_extraction_stage(
             )
 
     # Advance to VALIDATING
-    store.advance(task_id, "worker", "VALIDATING")
+    store.advance_for_worker(ctx, "VALIDATING")
     return {"extracted": extracted_count}

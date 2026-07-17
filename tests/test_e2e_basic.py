@@ -11,6 +11,7 @@ import os
 import sys
 import asyncio
 import tempfile
+import time
 
 import pytest
 
@@ -19,9 +20,19 @@ sys.path.insert(0, os.path.join(ROOT, "python-tools"))
 
 from workflow_engine import WorkflowStore, TaskStatus, PermissionDeniedError  # noqa: E402
 from workflow_config import WorkflowConfig  # noqa: E402
+from workflow_worker import WorkflowWorker, StageRegistry, FunctionStageHandler  # noqa: E402
 from workflow_models import SearchQuery, TaskDefinition  # noqa: E402
-from adapters.mock_search import MockSearchProvider  # noqa: E402
+from adapters.mock_search import MockSearchProvider, MockFulltextProvider  # noqa: E402
 from adapters.mock_agent import MockAgentAdapter  # noqa: E402
+from adapters.mock_embedding import MockEmbeddingRetriever, MockReranker  # noqa: E402
+from adapters.mock_parser import MockDocumentParser  # noqa: E402
+from pipeline.search_stage import run_search_stage  # noqa: E402
+from pipeline.screening_stage import run_screening_stage  # noqa: E402
+from pipeline.fulltext_stage import run_fulltext_stage  # noqa: E402
+from pipeline.parse_stage import run_parse_stage  # noqa: E402
+from pipeline.extraction_stage import run_extraction_stage  # noqa: E402
+from pipeline.validation_stage import run_validation_stage  # noqa: E402
+from pipeline.report_stage import run_report_stage  # noqa: E402
 
 
 @pytest.mark.asyncio
@@ -553,3 +564,185 @@ async def test_e2e_mixed_evidence_per_field():
         )
     finally:
         import shutil; shutil.rmtree(tmp, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_e2e_real_worker_smoke():
+    """Real WorkflowWorker drives the full pipeline end-to-end.
+
+    The worker is started as a background asyncio task. The test polls task
+    status synchronously and only intervenes at human-gate stages:
+
+      SEARCHING -> (worker runs) -> WAITING_PAPER_APPROVAL -> alice approves
+      -> FETCHING_FULLTEXT -> (worker runs) -> PARSING -> (worker runs)
+      -> EXTRACTING -> (worker runs) -> VALIDATING -> (worker runs)
+      -> GENERATING_REPORT -> (worker runs) -> WAITING_DATA_REVIEW
+
+    The test MUST NOT call store.advance() or store.record_extraction()
+    directly, and it MUST NOT use "worker" as the actor_id for user API calls.
+    """
+    tmp = tempfile.mkdtemp()
+    worker_task: asyncio.Task | None = None
+    try:
+        config = WorkflowConfig(
+            db_path=os.path.join(tmp, "db", "workflow.db"),
+            worker_id="smoke-worker",
+            poll_interval=0.1,
+            lease_duration=10,
+            renew_interval=2,
+        )
+        store = WorkflowStore(config.db_path)
+
+        # -- Create mock adapters ----------------------------------------
+        search = MockSearchProvider()
+        fulltext = MockFulltextProvider()
+        retriever = MockEmbeddingRetriever()
+        reranker = MockReranker()
+        parser = MockDocumentParser()
+        agent = MockAgentAdapter()
+
+        # -- Wire stage handlers with FunctionStageHandler --------------
+        registry = StageRegistry(config)
+        registry.register(
+            "SEARCHING",
+            FunctionStageHandler(
+                "SEARCHING",
+                lambda ctx, job, s: run_search_stage(ctx, job, s, search),
+            ),
+        )
+        registry.register(
+            "SCREENING",
+            FunctionStageHandler(
+                "SCREENING",
+                lambda ctx, job, s: run_screening_stage(ctx, job, s, retriever, reranker, agent),
+            ),
+        )
+        registry.register(
+            "FETCHING_FULLTEXT",
+            FunctionStageHandler(
+                "FETCHING_FULLTEXT",
+                lambda ctx, job, s: run_fulltext_stage(ctx, job, s, fulltext),
+            ),
+        )
+        registry.register(
+            "PARSING",
+            FunctionStageHandler(
+                "PARSING",
+                lambda ctx, job, s: run_parse_stage(ctx, job, s, parser),
+            ),
+        )
+        registry.register(
+            "EXTRACTING",
+            FunctionStageHandler(
+                "EXTRACTING",
+                lambda ctx, job, s: run_extraction_stage(ctx, job, s, agent),
+            ),
+        )
+        registry.register(
+            "VALIDATING",
+            FunctionStageHandler(
+                "VALIDATING",
+                lambda ctx, job, s: run_validation_stage(ctx, job, s),
+            ),
+        )
+        registry.register(
+            "GENERATING_REPORT",
+            FunctionStageHandler(
+                "GENERATING_REPORT",
+                lambda ctx, job, s: run_report_stage(ctx, job, s, agent),
+            ),
+        )
+        registry.validate_required_stages()
+
+        worker = WorkflowWorker(config, store, registry)
+
+        # -- Alice creates and starts the task ---------------------------
+        task = store.create_task(
+            "alice",
+            "Flexible conductive composite optimization",
+            "Find optimal PEO/AgNW formulation for high conductivity",
+        )
+        store.update_definition(
+            task["id"],
+            "alice",
+            {
+                "research_object": "PEO/AgNW conductive composite",
+                "application": "flexible electronics",
+                "target_metrics": [
+                    {"name": "conductivity", "unit": "S/cm", "target_range": ">1000"},
+                ],
+                "hard_constraints": ["lab feasible", "non-toxic"],
+                "optimization_objectives": ["maximize conductivity", "maintain flexibility"],
+                "acceptable_tradeoffs": ["cost"],
+                "paper_target": 10,
+                "languages": ["zh", "en"],
+                "temporary_lab_constraints": [],
+            },
+        )
+        task = store.start_search(task["id"], "alice")
+        assert task["status"] == TaskStatus.SEARCHING
+
+        # -- Start the real worker in the background ---------------------
+        worker_task = asyncio.create_task(worker.run())
+
+        async def _poll_task(
+            actor_id: str,
+            expected: set[str],
+            timeout: float = 30,
+        ) -> dict:
+            """Poll get_task until status is in *expected* or timeout."""
+            deadline = time.monotonic() + timeout
+            last_status = None
+            while time.monotonic() < deadline:
+                t = store.get_task(task["id"], actor_id)
+                last_status = t["status"]
+                if t["status"] in expected:
+                    return t
+                await asyncio.sleep(0.3)
+            raise AssertionError(
+                f"Task did not reach {expected} within {timeout}s "
+                f"(last status: {last_status})"
+            )
+
+        # -- Wait for worker to finish search ----------------------------
+        task = await _poll_task("alice", {TaskStatus.WAITING_PAPER_APPROVAL})
+        assert task["status"] == TaskStatus.WAITING_PAPER_APPROVAL
+
+        # -- Alice approves papers (NOT "worker") ------------------------
+        papers = store.list_papers(task["id"], "alice")
+        assert len(papers) > 0, "Worker should have submitted candidate papers"
+        selected = [p["id"] for p in papers[:3]]
+        task = store.approve_papers(task["id"], "alice", selected)
+        assert task["status"] == TaskStatus.FETCHING_FULLTEXT
+
+        # -- Wait for worker to drive through all remaining stages -------
+        task = await _poll_task(
+            "alice",
+            {TaskStatus.WAITING_DATA_REVIEW, TaskStatus.COMPLETED},
+            timeout=30,
+        )
+        assert task["status"] in {
+            TaskStatus.WAITING_DATA_REVIEW,
+            TaskStatus.COMPLETED,
+        }, f"Expected WAITING_DATA_REVIEW or COMPLETED, got {task['status']}"
+
+        # -- Verify worker recorded extractions --------------------------
+        extractions = store.list_extractions(task["id"], "alice")
+        assert len(extractions) > 0, (
+            f"Worker should have recorded extractions, got {len(extractions)}"
+        )
+
+        # Verify that at least one extraction has a real payload
+        payloads = [e.get("payload", {}) for e in extractions if e.get("payload")]
+        assert len(payloads) > 0, "Extractions should have non-empty payloads"
+
+    finally:
+        import shutil
+
+        if worker_task is not None:
+            worker_task.cancel()
+            try:
+                await worker_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        shutil.rmtree(tmp, ignore_errors=True)

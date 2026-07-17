@@ -8,7 +8,7 @@ Phase 2A minimal validation:
   3. Page numbers are positive integers.
 """
 
-from workflow_engine import WorkflowStore
+from workflow_engine import WorkerContext, WorkflowStore
 from workflow_models import (
     SampleExtraction,
     EvidenceLocator,
@@ -19,6 +19,7 @@ VALID_SOURCE_TYPES = {"explicit", "derived", "estimated", "inferred", "missing"}
 
 
 async def run_validation_stage(
+    ctx: WorkerContext,
     job: dict,
     store: WorkflowStore,
 ) -> dict:
@@ -29,7 +30,7 @@ async def run_validation_stage(
     GENERATING_REPORT on success (issues are warnings, not blockers).
     """
     task_id = job["task_id"]
-    extractions = store.list_extractions(task_id, "worker")
+    extractions = store.list_extractions_for_worker(ctx)
 
     issues: list[dict] = []
     validated_count = 0
@@ -128,7 +129,7 @@ async def run_validation_stage(
         validated_count += 1
 
     # Advance to GENERATING_REPORT (issues are non-blocking)
-    store.advance(task_id, "worker", "GENERATING_REPORT")
+    store.advance_for_worker(ctx, "GENERATING_REPORT")
 
     return {
         "validated_count": validated_count,

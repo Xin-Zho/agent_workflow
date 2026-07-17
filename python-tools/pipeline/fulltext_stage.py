@@ -4,12 +4,13 @@ import hashlib
 import os
 import uuid
 
-from workflow_engine import WorkflowStore
+from workflow_engine import WorkerContext, WorkflowStore
 from artifact_utils import atomic_write_unique
 from pipeline.contracts import FulltextProvider
 
 
 async def run_fulltext_stage(
+    ctx: WorkerContext,
     job: dict,
     store: WorkflowStore,
     provider: FulltextProvider,
@@ -21,12 +22,12 @@ async def run_fulltext_stage(
     task to PARSING when complete.
     """
     task_id = job["task_id"]
-    papers = store.list_papers(task_id, "worker")
+    papers = store.list_papers_for_worker(ctx)
     selected = [p for p in papers if p.get("paper_status") == "selected"]
 
     if not selected:
         # Nothing to fetch -- advance directly
-        store.advance(task_id, "worker", "PARSING")
+        store.advance_for_worker(ctx, "PARSING")
         return {"downloaded": 0, "degraded": 0}
 
     import workflow_models as wm
@@ -62,5 +63,5 @@ async def run_fulltext_stage(
             )
 
     # Advance to PARSING
-    store.advance(task_id, "worker", "PARSING")
+    store.advance_for_worker(ctx, "PARSING")
     return {"downloaded": downloaded, "degraded": len(selected) - downloaded}

@@ -1,11 +1,12 @@
 """SEARCHING stage: query academic sources for candidate papers."""
 
-from workflow_engine import WorkflowStore
+from workflow_engine import WorkerContext, WorkflowStore
 from workflow_models import TaskDefinition, SearchQuery
 from pipeline.contracts import SearchProvider
 
 
 async def run_search_stage(
+    ctx: WorkerContext,
     job: dict,
     store: WorkflowStore,
     search: SearchProvider,
@@ -15,7 +16,7 @@ async def run_search_stage(
     Queries the configured SearchProvider for papers matching the task
     definition, then submits the results as candidates.
     """
-    task = store.get_task(job["task_id"], job.get("owner_id", "worker"))
+    task = store.get_task_for_worker(ctx)
     definition = TaskDefinition(**task["definition"])
 
     query = SearchQuery(
@@ -45,5 +46,5 @@ async def run_search_stage(
             "fulltext_status": "unknown",
         })
 
-    store.submit_candidates(job["task_id"], "worker", papers)
+    store.submit_candidates_for_worker(ctx, papers)
     return {"papers_found": len(papers)}

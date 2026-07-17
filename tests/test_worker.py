@@ -4,7 +4,7 @@ import pytest
 ROOT = os.path.dirname(os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(ROOT, "python-tools"))
 
-from workflow_engine import WorkflowStore, TaskStatus
+from workflow_engine import WorkerContext, WorkflowStore, TaskStatus
 from workflow_worker import WorkflowWorker, StageRegistry, StageHandler, LeaseLostError, RetryableError, FatalError
 from workflow_config import WorkflowConfig
 
@@ -15,7 +15,7 @@ class FakeHandler(StageHandler):
         self.should_fail = should_fail
         self.call_count = 0
 
-    async def run(self, job, store):
+    async def run(self, job, store, ctx=None):
         self.call_count += 1
         if self.should_fail == "retry":
             raise RetryableError("transient")
@@ -47,7 +47,13 @@ async def test_worker_claims_and_completes_job():
         # Run one iteration
         job = store.claim_next_job(config.worker_id)
         assert job is not None
-        await handler.run(job, store)
+        ctx = WorkerContext(
+            worker_id=config.worker_id,
+            job_id=job["id"],
+            task_id=job["task_id"],
+            lease_token=job["lease_token"],
+        )
+        await handler.run(job, store, ctx)
         ok = store.complete_job(job["id"], config.worker_id, job["lease_token"], result=handler.result)
         assert ok is True
         assert handler.call_count == 1
