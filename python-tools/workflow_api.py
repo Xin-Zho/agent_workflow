@@ -159,7 +159,7 @@ def create_workflow_router(
         task_id: str, req: PaperApproval, user: dict = Depends(auth_dependency)
     ):
         try:
-            return store.approve_papers(task_id, user["sub"], req.selected_ids)
+            return store.approve_papers(task_id, user["sub"], req.selected_ids, is_admin=_is_admin(user))
         except WorkflowError as exc:
             raise _handle_error(exc) from exc
 

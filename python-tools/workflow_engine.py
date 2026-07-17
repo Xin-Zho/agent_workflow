@@ -358,8 +358,9 @@ class WorkflowStore:
         task_id: str,
         actor_id: str,
         selected_ids: list[str],
+        is_admin: bool = False,
     ) -> dict[str, Any]:
-        task = self.get_task(task_id, actor_id)
+        task = self.get_task(task_id, actor_id, is_admin)
         if task["status"] != TaskStatus.WAITING_PAPER_APPROVAL:
             raise InvalidTransitionError("Task is not waiting for paper approval")
         with self._connect() as conn:

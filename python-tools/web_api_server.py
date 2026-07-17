@@ -61,12 +61,13 @@ DEFAULT_PORT = int(os.environ.get("PORT", "8000"))
 
 # ── JWT 工具 ────────────────────────────────────────────────────────
 
-def create_token(user_id: str, expires_hours: int = 24) -> str:
+def create_token(user_id: str, expires_hours: int = 24, role: str = "user") -> str:
     """简易 JWT（HMAC-SHA256），生产环境换 PyJWT。"""
     header = base64url_encode(json.dumps({"alg": "HS256", "typ": "JWT"}))
     now = int(time.time())
     payload = base64url_encode(json.dumps({
         "sub": user_id,
+        "role": role,
         "iat": now,
         "exp": now + expires_hours * 3600,
         "jti": uuid.uuid4().hex[:12],
@@ -345,6 +346,7 @@ class ChatRequest(BaseModel):
 
 class TokenRequest(BaseModel):
     user_id: str
+    password: str
     expires_hours: int = 24
 
 
@@ -368,8 +370,16 @@ async def health():
 
 @app.post("/api/auth/token")
 async def login(req: TokenRequest):
-    """获取 JWT token（简易认证）。"""
-    token = create_token(req.user_id, req.expires_hours)
+    """获取 JWT token，验证密码。"""
+    from workflow_config import WorkflowConfig
+    config = WorkflowConfig()
+    if config.app_env == "test":
+        user = config.test_users.get(req.user_id)
+        if not user or user["password"] != req.password:
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+        token = create_token(req.user_id, req.expires_hours, role=user["role"])
+    else:
+        raise HTTPException(status_code=501, detail="Production auth not implemented")
     return {
         "access_token": token,
         "token_type": "bearer",
