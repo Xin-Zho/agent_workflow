@@ -10,7 +10,6 @@ class MockDocumentParser:
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
             pages = []
             for i, page in enumerate(doc):
-                text = page.get_text()
                 blocks = []
                 block_idx = 0
                 for b in page.get_text("blocks"):
