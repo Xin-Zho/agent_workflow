@@ -15,17 +15,36 @@ import sqlite3
 import threading
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Iterable
+from dataclasses import dataclass
 
 
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(sep=' ')
+DB_TIME_FORMAT = "%Y-%m-%d %H:%M:%S.%f"
+
+
+def db_utc_now() -> str:
+    return datetime.now(timezone.utc).strftime(DB_TIME_FORMAT)
+
+
+def db_utc_after(seconds: int) -> str:
+    return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).strftime(DB_TIME_FORMAT)
+
+
+utc_now = db_utc_now  # backward compatibility
 
 
 ClaimedJob = dict[str, Any]  # returned by claim_next_job
+
+
+@dataclass(frozen=True)
+class WorkerContext:
+    worker_id: str
+    job_id: int
+    task_id: str
+    lease_token: str
 
 
 class WorkflowError(RuntimeError):
@@ -177,7 +196,7 @@ class WorkflowStore:
                     conn.executescript(sql_text)
                     conn.execute(
                         "INSERT INTO schema_migrations (version, name, checksum, applied_at) VALUES (?, ?, ?, ?)",
-                        (version, sql_file.name, current_checksum, utc_now()),
+                        (version, sql_file.name, current_checksum, db_utc_now()),
                     )
 
                 conn.commit()
@@ -215,7 +234,7 @@ class WorkflowStore:
                (task_id, actor_id, event_type, from_status, to_status,
                 details_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (task_id, actor_id, event_type, from_status, to_status,
-             self._json(details or {}), utc_now()),
+             self._json(details or {}), db_utc_now()),
         )
 
     def create_task(
@@ -226,7 +245,7 @@ class WorkflowStore:
         definition: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         task_id = uuid.uuid4().hex
-        now = utc_now()
+        now = db_utc_now()
         payload = definition or {}
         payload.setdefault("languages", ["zh", "en"])
         payload.setdefault("year_policy", "recent_5_years_plus_foundational")
@@ -280,7 +299,7 @@ class WorkflowStore:
         with self._connect() as conn:
             conn.execute(
                 "UPDATE tasks SET definition_json = ?, coverage_json = ?, updated_at = ? WHERE id = ?",
-                (self._json(definition), self._json(coverage or task["coverage"]), utc_now(), task_id),
+                (self._json(definition), self._json(coverage or task["coverage"]), db_utc_now(), task_id),
             )
             self._event(conn, task_id, actor_id, "definition_updated",
                         task["status"], task["status"])
@@ -302,7 +321,7 @@ class WorkflowStore:
         task = self.get_task(task_id, actor_id)
         if task["status"] not in {TaskStatus.SEARCHING, TaskStatus.SCREENING}:
             raise InvalidTransitionError("Candidates are only accepted during search/screening")
-        now = utc_now()
+        now = db_utc_now()
         count = 0
         with self._connect() as conn:
             for paper in papers:
@@ -373,7 +392,7 @@ class WorkflowStore:
             conn.execute("UPDATE papers SET selection_status = 'rejected' WHERE task_id = ?", (task_id,))
             conn.executemany(
                 "UPDATE papers SET selection_status = 'selected', paper_status = 'selected', updated_at = ? WHERE id = ?",
-                [(utc_now(), paper_id) for paper_id in selected_ids],
+                [(db_utc_now(), paper_id) for paper_id in selected_ids],
             )
         return self._transition(
             task, actor_id, TaskStatus.FETCHING_FULLTEXT,
@@ -383,11 +402,28 @@ class WorkflowStore:
     def update_paper_status(
         self, paper_id: str, status: str, error: str | None = None
     ) -> None:
-        now = utc_now()
+        now = db_utc_now()
         with self._connect() as conn:
             conn.execute(
                 "UPDATE papers SET paper_status = ?, error_message = ?, updated_at = ? WHERE id = ?",
                 (status, error, now, paper_id),
+            )
+
+    def update_screening_results(self, rows: list[tuple]) -> None:
+        """Batch-update screening scores and role_tags for a set of papers.
+
+        Each row must be a 6-tuple:
+          (role_tags_json, relevance_score, authority_score,
+           confidence_score, updated_at, paper_id)
+        """
+        with self._connect() as conn:
+            conn.executemany(
+                """UPDATE papers
+                   SET role_tags_json = ?, relevance_score = ?,
+                       authority_score = ?, confidence_score = ?,
+                       updated_at = ?
+                   WHERE id = ?""",
+                rows,
             )
 
     def record_extraction(
@@ -426,7 +462,7 @@ class WorkflowStore:
                     confidence_score, review_status, created_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)""",
                 (extraction_id, task_id, paper_id, version, self._json(payload),
-                 source_type, confidence_score, utc_now()),
+                 source_type, confidence_score, db_utc_now()),
             )
             self._event(conn, task_id, actor_id, "extraction_recorded",
                         task["status"], task["status"],
@@ -485,7 +521,7 @@ class WorkflowStore:
         path: str,
         sha256: str | None = None,
     ) -> dict[str, Any]:
-        now = utc_now()
+        now = db_utc_now()
         artifact_id = uuid.uuid4().hex
         with self._connect() as conn:
             conn.execute(
@@ -511,7 +547,7 @@ class WorkflowStore:
         return [self._decode_row(row) for row in rows]
 
     def record_report(self, task_id: str, path: str, format: str = "markdown") -> dict:
-        now = utc_now()
+        now = db_utc_now()
         report_id = uuid.uuid4().hex
         with self._connect() as conn:
             version = conn.execute(
@@ -593,7 +629,7 @@ class WorkflowStore:
         with self._connect() as conn:
             conn.execute(
                 "UPDATE jobs SET status = 'cancelled', updated_at = ? WHERE task_id = ? AND status = 'queued'",
-                (utc_now(), task_id),
+                (db_utc_now(), task_id),
             )
 
     def _transition(
@@ -605,7 +641,7 @@ class WorkflowStore:
         details: dict[str, Any] | None = None,
         enqueue: bool = False,
     ) -> dict[str, Any]:
-        now = utc_now()
+        now = db_utc_now()
         previous = task["status"]
         with self._connect() as conn:
             cur = conn.execute(
@@ -630,11 +666,9 @@ class WorkflowStore:
     def claim_next_job(self, worker_id: str, lease_duration: int = 300) -> ClaimedJob | None:
         """Claim the oldest eligible job with lease fencing."""
         import uuid as _uuid
-        from datetime import timedelta as _timedelta
-        now_dt = datetime.now(timezone.utc)
-        now = now_dt.isoformat(sep=' ')
+        now = db_utc_now()
         lease_token = _uuid.uuid4().hex
-        lease_expires_at = (now_dt + _timedelta(seconds=lease_duration)).isoformat(sep=' ')
+        lease_expires_at = db_utc_after(lease_duration)
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
@@ -675,7 +709,7 @@ class WorkflowStore:
     def complete_job(self, job_id: int, worker_id: str, lease_token: str,
                      result: dict[str, Any] | None = None) -> bool:
         """Complete a job — fenced by worker_id + lease_token."""
-        now = utc_now()
+        now = db_utc_now()
         with self._connect() as conn:
             cur = conn.execute(
                 """UPDATE jobs SET status = 'completed', result_json = ?, updated_at = ?
@@ -695,37 +729,62 @@ class WorkflowStore:
 
     def retry_job(self, job_id: int, worker_id: str, lease_token: str,
                   error: str = "") -> bool:
-        """Mark job for retry after backoff — fenced."""
-        now = utc_now()
+        """Mark job for retry after backoff — fenced.
+
+        Transaction order (all inside BEGIN IMMEDIATE):
+        1. Verify lease
+        2. If not found → return False (fencing)
+        3. Read attempts / max_attempts
+        4. Compute next state
+        5. UPDATE jobs
+        6. INSERT INTO job_attempts
+        """
         with self._connect() as conn:
-            # Record failed attempt
+            # 1. Verify lease first
+            row = conn.execute(
+                "SELECT 1 FROM jobs WHERE id=? AND worker_id=? AND lease_token=? AND status='running'",
+                (job_id, worker_id, lease_token),
+            ).fetchone()
+            if row is None:
+                return False  # 2. Fencing — lease not valid
+
+            # 3. Read attempts/max_attempts
+            row = conn.execute(
+                "SELECT attempts, max_attempts FROM jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+
+            # 4. Compute next state
+            if row["attempts"] >= row["max_attempts"]:
+                status = "dead_letter"
+                next_retry_at = None
+            else:
+                status = "retry_wait"
+                delay = {1: 5, 2: 30}.get(row["attempts"], 30)
+                next_retry_at = db_utc_after(delay)
+
+            # 5. UPDATE jobs
+            conn.execute(
+                """UPDATE jobs SET status = ?, next_retry_at = ?,
+                   worker_id = NULL, lease_token = NULL, error = ?, updated_at = ?
+                   WHERE id = ? AND worker_id = ? AND lease_token = ? AND status = 'running'""",
+                (status, next_retry_at, error, db_utc_now(),
+                 job_id, worker_id, lease_token),
+            )
+
+            # 6. INSERT INTO job_attempts
             conn.execute(
                 """INSERT INTO job_attempts (job_id, worker_id, lease_token, attempt_num,
                    started_at, finished_at, error)
                    SELECT ?, ?, ?, attempts, claimed_at, ?, ? FROM jobs WHERE id = ?""",
-                (job_id, worker_id, lease_token, now, error, job_id),
+                (job_id, worker_id, lease_token, db_utc_now(), error, job_id),
             )
-            # Determine delay based on attempts
-            row = conn.execute("SELECT attempts, max_attempts FROM jobs WHERE id = ?", (job_id,)).fetchone()
-            if row is None:
-                return False
-            delay = {1: 5, 2: 30}.get(row["attempts"], 30)
-            # If max attempts reached, set next_retry_at to now so
-            # _promote_dead_letters or the inline promotion in claim_next_job
-            # immediately moves it to dead_letter.
-            retry_delay = 0 if row["attempts"] >= row["max_attempts"] else delay
-            cur = conn.execute(
-                """UPDATE jobs SET status = 'retry_wait', next_retry_at = datetime(?, '+' || ? || ' seconds'),
-                   worker_id = NULL, lease_token = NULL, error = ?, updated_at = ?
-                   WHERE id = ? AND worker_id = ? AND lease_token = ? AND status = 'running'""",
-                (now, str(retry_delay), error, now, job_id, worker_id, lease_token),
-            )
-            return cur.rowcount > 0
+
+            return True
 
     def fail_job(self, job_id: int, worker_id: str, lease_token: str,
                  error: str = "") -> bool:
         """Permanently fail a job — fenced."""
-        now = utc_now()
+        now = db_utc_now()
         with self._connect() as conn:
             conn.execute(
                 """INSERT INTO job_attempts (job_id, worker_id, lease_token, attempt_num,
@@ -743,9 +802,7 @@ class WorkflowStore:
     def renew_lease(self, job_id: int, worker_id: str, lease_token: str,
                     lease_duration: int = 300) -> bool:
         """Extend lease — fenced. Returns False if lease was lost."""
-        from datetime import timedelta as _timedelta
-        now_dt = datetime.now(timezone.utc)
-        lease_expires_at = (now_dt + _timedelta(seconds=lease_duration)).isoformat(sep=' ')
+        lease_expires_at = db_utc_after(lease_duration)
         with self._connect() as conn:
             cur = conn.execute(
                 """UPDATE jobs SET lease_expires_at = ?
@@ -756,7 +813,7 @@ class WorkflowStore:
 
     def _promote_dead_letters(self) -> None:
         """Move maxed-out jobs to dead_letter."""
-        now = utc_now()
+        now = db_utc_now()
         with self._connect() as conn:
             conn.execute(
                 """UPDATE jobs SET status = 'dead_letter', updated_at = ?
@@ -772,6 +829,226 @@ class WorkflowStore:
                 "SELECT * FROM task_events WHERE task_id = ? ORDER BY id", (task_id,)
             ).fetchall()
         return [self._decode_row(row) for row in rows]
+
+    # ── Worker-specific methods (lease-verified, bypass owner check) ─────
+
+    def _verify_worker_lease(self, conn: sqlite3.Connection, ctx: WorkerContext) -> None:
+        """Verify the worker still holds a valid lease on the job."""
+        row = conn.execute(
+            "SELECT 1 FROM jobs WHERE id = ? AND task_id = ? AND worker_id = ? AND lease_token = ? AND status = 'running'",
+            (ctx.job_id, ctx.task_id, ctx.worker_id, ctx.lease_token),
+        ).fetchone()
+        if not row:
+            raise PermissionDeniedError(
+                f"Worker lease is not valid for job {ctx.job_id} on task {ctx.task_id}"
+            )
+
+    def get_task_for_worker(self, ctx: WorkerContext) -> dict[str, Any] | None:
+        """Get task by worker context (lease-verified, bypasses owner check)."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._verify_worker_lease(conn, ctx)
+            row = conn.execute("SELECT * FROM tasks WHERE id = ?", (ctx.task_id,)).fetchone()
+            conn.commit()
+            return self._decode_row(row) if row else None
+
+    def list_papers_for_worker(self, ctx: WorkerContext) -> list[dict[str, Any]]:
+        """List papers by worker context (lease-verified, bypasses owner check)."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._verify_worker_lease(conn, ctx)
+            rows = conn.execute(
+                "SELECT * FROM papers WHERE task_id = ? ORDER BY relevance_score DESC, created_at",
+                (ctx.task_id,),
+            ).fetchall()
+            conn.commit()
+            return [self._decode_row(r) for r in rows]
+
+    def list_extractions_for_worker(self, ctx: WorkerContext) -> list[dict[str, Any]]:
+        """List latest extractions by worker context (lease-verified, bypasses owner check)."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._verify_worker_lease(conn, ctx)
+            rows = conn.execute(
+                """SELECT e.* FROM extractions e
+                   JOIN (SELECT paper_id, MAX(version) AS version FROM extractions
+                         WHERE task_id = ? GROUP BY paper_id) latest
+                   ON e.paper_id = latest.paper_id AND e.version = latest.version
+                   ORDER BY e.created_at""",
+                (ctx.task_id,),
+            ).fetchall()
+            conn.commit()
+            return [self._decode_row(r) for r in rows]
+
+    def submit_candidates_for_worker(
+        self, ctx: WorkerContext, papers: Iterable[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Submit candidate papers by worker context (lease-verified, bypasses owner check)."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._verify_worker_lease(conn, ctx)
+            task_row = conn.execute("SELECT * FROM tasks WHERE id = ?", (ctx.task_id,)).fetchone()
+            if not task_row:
+                raise NotFoundError(f"Task not found: {ctx.task_id}")
+            task = self._decode_row(task_row)
+            if task["status"] not in {TaskStatus.SEARCHING, TaskStatus.SCREENING}:
+                raise InvalidTransitionError("Candidates are only accepted during search/screening")
+            actor_id = f"system:worker:{ctx.worker_id}"
+            now = db_utc_now()
+            count = 0
+            for paper in papers:
+                paper_id = paper.get("id") or uuid.uuid4().hex
+                work_id = paper.get("work_id") or self._work_id(paper)
+                metadata = dict(paper.get("metadata") or {})
+                for key in ("authors", "year", "abstract", "doi", "source",
+                            "document_type", "url", "language"):
+                    if key in paper:
+                        metadata[key] = paper[key]
+                conn.execute(
+                    """INSERT OR REPLACE INTO papers
+                       (id, task_id, work_id, title, metadata_json, role_tags_json,
+                        relevance_score, authority_score, confidence_score,
+                        evidence_level, fulltext_status, selection_status,
+                        created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (paper_id, ctx.task_id, work_id, paper["title"], self._json(metadata),
+                     self._json(paper.get("role_tags", [])), paper.get("relevance_score"),
+                     paper.get("authority_score"), paper.get("confidence_score"),
+                     paper.get("evidence_level", "abstract_only"),
+                     paper.get("fulltext_status", "unknown"), "candidate", now, now),
+                )
+                count += 1
+            previous = task["status"]
+            conn.execute(
+                "UPDATE tasks SET status = ?, previous_status = ?, updated_at = ? WHERE id = ?",
+                (TaskStatus.WAITING_PAPER_APPROVAL, previous, now, ctx.task_id),
+            )
+            self._event(conn, ctx.task_id, actor_id, "candidates_submitted",
+                        previous, TaskStatus.WAITING_PAPER_APPROVAL,
+                        {"count": count})
+            result_row = conn.execute("SELECT * FROM tasks WHERE id = ?", (ctx.task_id,)).fetchone()
+            conn.commit()
+            return self._decode_row(result_row)
+
+    def record_extraction_for_worker(
+        self,
+        ctx: WorkerContext,
+        paper_id: str,
+        payload: dict[str, Any],
+        source_type: str,
+        confidence_score: float,
+    ) -> dict[str, Any]:
+        """Record extraction by worker context (lease-verified, bypasses owner check)."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._verify_worker_lease(conn, ctx)
+            task_row = conn.execute("SELECT * FROM tasks WHERE id = ?", (ctx.task_id,)).fetchone()
+            if not task_row:
+                raise NotFoundError(f"Task not found: {ctx.task_id}")
+            task = self._decode_row(task_row)
+            if task["status"] not in {
+                TaskStatus.FETCHING_FULLTEXT, TaskStatus.PARSING, TaskStatus.READING,
+                TaskStatus.EXTRACTING, TaskStatus.VALIDATING, TaskStatus.GENERATING_REPORT,
+            }:
+                raise InvalidTransitionError("Task is not in the full-text processing pipeline")
+            paper = conn.execute(
+                "SELECT id FROM papers WHERE id = ? AND task_id = ?", (paper_id, ctx.task_id)
+            ).fetchone()
+            if not paper:
+                raise NotFoundError(f"Paper not found: {paper_id}")
+            version = conn.execute(
+                "SELECT COALESCE(MAX(version), 0) + 1 FROM extractions WHERE paper_id = ?",
+                (paper_id,),
+            ).fetchone()[0]
+            extraction_id = uuid.uuid4().hex
+            conn.execute(
+                "UPDATE extractions SET review_status = 'superseded' WHERE paper_id = ? AND review_status = 'pending'",
+                (paper_id,),
+            )
+            conn.execute(
+                """INSERT INTO extractions
+                   (id, task_id, paper_id, version, payload_json, source_type,
+                    confidence_score, review_status, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)""",
+                (extraction_id, ctx.task_id, paper_id, version, self._json(payload),
+                 source_type, confidence_score, db_utc_now()),
+            )
+            actor_id = f"system:worker:{ctx.worker_id}"
+            self._event(conn, ctx.task_id, actor_id, "extraction_recorded",
+                        task["status"], task["status"],
+                        {"paper_id": paper_id, "version": version})
+            conn.commit()
+        return {"id": extraction_id, "paper_id": paper_id, "version": version}
+
+    def advance_for_worker(self, ctx: WorkerContext, target: str) -> dict[str, Any]:
+        """Advance task stage by worker context (lease-verified, bypasses owner check)."""
+        target_status = TaskStatus(target)
+        allowed: dict[TaskStatus, set[TaskStatus]] = {
+            TaskStatus.FETCHING_FULLTEXT: {TaskStatus.PARSING},
+            TaskStatus.PARSING: {TaskStatus.READING, TaskStatus.EXTRACTING},
+            TaskStatus.READING: {TaskStatus.EXTRACTING},
+            TaskStatus.EXTRACTING: {TaskStatus.VALIDATING},
+            TaskStatus.VALIDATING: {TaskStatus.GENERATING_REPORT},
+        }
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._verify_worker_lease(conn, ctx)
+            task_row = conn.execute("SELECT * FROM tasks WHERE id = ?", (ctx.task_id,)).fetchone()
+            if not task_row:
+                raise NotFoundError(f"Task not found: {ctx.task_id}")
+            task = self._decode_row(task_row)
+            if target_status not in allowed.get(TaskStatus(task["status"]), set()):
+                raise InvalidTransitionError(
+                    f"Cannot advance {task['status']} to {target_status}"
+                )
+            actor_id = f"system:worker:{ctx.worker_id}"
+            now = db_utc_now()
+            previous = task["status"]
+            cur = conn.execute(
+                "UPDATE tasks SET status = ?, previous_status = ?, updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ?",
+                (target_status, previous, now, task["id"], task["revision"]),
+            )
+            if cur.rowcount == 0:
+                raise InvalidTransitionError("Concurrent modification detected — retry")
+            self._event(conn, task["id"], actor_id, "stage_advanced",
+                        previous, target_status)
+            conn.execute(
+                """INSERT INTO jobs
+                   (task_id, stage, payload_json, status, attempts, created_at, updated_at)
+                   VALUES (?, ?, ?, 'queued', 0, ?, ?)""",
+                (task["id"], target, self._json({}), now, now),
+            )
+            result_row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task["id"],)).fetchone()
+            conn.commit()
+            return self._decode_row(result_row)
+
+    def request_data_review_for_worker(self, ctx: WorkerContext) -> dict[str, Any]:
+        """Request data review by worker context (lease-verified, bypasses owner check)."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._verify_worker_lease(conn, ctx)
+            task_row = conn.execute("SELECT * FROM tasks WHERE id = ?", (ctx.task_id,)).fetchone()
+            if not task_row:
+                raise NotFoundError(f"Task not found: {ctx.task_id}")
+            task = self._decode_row(task_row)
+            if task["status"] not in {
+                TaskStatus.EXTRACTING, TaskStatus.VALIDATING, TaskStatus.GENERATING_REPORT,
+            }:
+                raise InvalidTransitionError("Task has not finished extraction")
+            actor_id = f"system:worker:{ctx.worker_id}"
+            now = db_utc_now()
+            previous = task["status"]
+            cur = conn.execute(
+                "UPDATE tasks SET status = ?, previous_status = ?, updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ?",
+                (TaskStatus.WAITING_DATA_REVIEW, previous, now, task["id"], task["revision"]),
+            )
+            if cur.rowcount == 0:
+                raise InvalidTransitionError("Concurrent modification detected — retry")
+            self._event(conn, task["id"], actor_id, "data_review_requested",
+                        previous, TaskStatus.WAITING_DATA_REVIEW)
+            result_row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task["id"],)).fetchone()
+            conn.commit()
+            return self._decode_row(result_row)
 
 
 def hashlib_sha256(value: str) -> str:

@@ -6,12 +6,13 @@ PaperMetadata has no role_tags field; role_tags are computed from the
 ScreeningDecision results returned by the agent adapter.
 """
 
-from workflow_engine import WorkflowStore
+from workflow_engine import WorkerContext, WorkflowStore
 from pipeline.contracts import EmbeddingRetriever, Reranker, AgentAdapter
-from workflow_models import TaskDefinition, PaperMetadata
+from workflow_models import TaskDefinition, PaperMetadata, ScoredPaper
 
 
 async def run_screening_stage(
+    ctx: WorkerContext,
     job: dict,
     store: WorkflowStore,
     retriever: EmbeddingRetriever,
@@ -24,9 +25,9 @@ async def run_screening_stage(
     agent-based abstract screening. Updates role_tags and scores on the
     paper records from the ScreeningDecision results.
     """
-    task = store.get_task(job["task_id"], "worker")
+    task = store.get_task_for_worker(ctx)
     definition = TaskDefinition(**task["definition"])
-    papers_raw = store.list_papers(job["task_id"], "worker")
+    papers_raw = store.list_papers_for_worker(ctx)
 
     # Convert to PaperMetadata (always attribute access, never .get())
     papers = [_paper_metadata(p) for p in papers_raw]
@@ -50,21 +51,35 @@ async def run_screening_stage(
         definition, [s.metadata for s in ranked]
     )
 
-    # Update paper role_tags and scores from screening decisions
-    # PaperMetadata has no role_tags field; we compute them from decisions.
+    # Build O(1) lookup indexes for scores and DB rows
+    ranked_by_work_id: dict[str, ScoredPaper] = {
+        item.metadata.work_id: item
+        for item in ranked
+    }
+    papers_by_work_id: dict[str, dict] = {}
+    for p in papers_raw:
+        papers_by_work_id.setdefault(p["work_id"], p)
+    # Note: keeps first occurrence (already sorted by score DESC from DB query)
+
+    # Prepare batch update rows using real retriever/reranker scores
     from workflow_engine import utc_now
-    now = utc_now()
+    rows = []
     for dec in decisions:
-        for paper_row in papers_raw:
-            if paper_row["work_id"] == dec.paper.work_id:
-                with store._connect() as conn:
-                    conn.execute(
-                        """UPDATE papers
-                           SET role_tags_json = ?, relevance_score = ?,
-                               updated_at = ?
-                           WHERE id = ?""",
-                        (store._json(dec.role_tags), 80.0, now, paper_row["id"]),
-                    )
+        paper_row = papers_by_work_id.get(dec.paper.work_id)
+        if not paper_row:
+            continue
+        scored = ranked_by_work_id.get(dec.paper.work_id)
+        rows.append((
+            store._json(dec.role_tags),
+            scored.relevance_score if scored else 0.0,
+            scored.authority_score if scored else 0.0,
+            scored.confidence_score if scored else 0.0,
+            utc_now(),
+            paper_row["id"],
+        ))
+
+    if rows:
+        store.update_screening_results(rows)
 
     return {
         "candidates_after_screening": len(decisions),
