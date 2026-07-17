@@ -14,7 +14,7 @@ class WorkflowConfig:
     db_path: str = field(
         default_factory=lambda: os.environ.get(
             "WORKFLOW_DB_PATH",
-            str(Path(__file__).resolve().parent.parent / "data" / "workflow.db"),
+            str(Path.home() / ".agent_workflow" / "data" / "workflow.db"),
         )
     )
 
@@ -30,7 +30,7 @@ class WorkflowConfig:
     data_dir: str = field(
         default_factory=lambda: os.environ.get(
             "WORKFLOW_DATA_DIR",
-            str(Path(__file__).resolve().parent.parent / "data"),
+            str(Path.home() / ".agent_workflow" / "data"),
         )
     )
 
