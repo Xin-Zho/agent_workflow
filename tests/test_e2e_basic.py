@@ -276,3 +276,105 @@ async def test_e2e_human_gates_owner_and_admin():
         import shutil
 
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_e2e_no_premature_job():
+    """After candidates submitted, no FETCHING_FULLTEXT job exists until approval."""
+    tmp = tempfile.mkdtemp()
+    try:
+        config = WorkflowConfig(db_path=os.path.join(tmp, "test.db"))
+        store = WorkflowStore(config.db_path)
+        task = store.create_task("alice", "test", "query")
+        store.update_definition(
+            task["id"],
+            "alice",
+            {
+                "research_object": "x",
+                "application": "y",
+                "target_metrics": [],
+                "hard_constraints": [],
+                "optimization_objectives": [],
+                "acceptable_tradeoffs": [],
+            },
+        )
+        store.start_search(task["id"], "alice")
+
+        # Worker claims the SEARCHING job and completes it (no FETCHING_FULLTEXT yet)
+        search_job = store.claim_next_job(config.worker_id)
+        assert search_job is not None and search_job["stage"] == "SEARCHING"
+
+        # Submit candidates (task transitions to WAITING_PAPER_APPROVAL)
+        store.submit_candidates(
+            task["id"],
+            "alice",
+            [
+                {"id": "p1", "title": "Test", "role_tags": ["target_performance"]},
+            ],
+        )
+        store.complete_job(
+            search_job["id"],
+            config.worker_id,
+            search_job["lease_token"],
+            result={"papers_found": 1},
+        )
+
+        # Verify no FETCHING_FULLTEXT job exists during WAITING_PAPER_APPROVAL
+        next_job = store.claim_next_job(config.worker_id)
+        assert next_job is None, "No job should exist during WAITING_PAPER_APPROVAL"
+    finally:
+        import shutil
+
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_e2e_single_paper_degradation():
+    """3 papers: 1 OK, 1 PDF corrupt, 1 partial parse. Task continues."""
+    tmp = tempfile.mkdtemp()
+    try:
+        config = WorkflowConfig(db_path=os.path.join(tmp, "test.db"))
+        store = WorkflowStore(config.db_path)
+        task = store.create_task("alice", "test", "query")
+        store.update_definition(
+            task["id"],
+            "alice",
+            {
+                "research_object": "x",
+                "application": "y",
+                "target_metrics": [],
+                "hard_constraints": [],
+                "optimization_objectives": [],
+                "acceptable_tradeoffs": [],
+            },
+        )
+        store.start_search(task["id"], "alice")
+        store.submit_candidates(
+            task["id"],
+            "alice",
+            [
+                {"id": "p1", "title": "Good paper", "role_tags": ["target_performance"]},
+                {"id": "p2", "title": "Corrupt PDF", "role_tags": ["lab_process"]},
+                {"id": "p3", "title": "Partial parse", "role_tags": ["structure"]},
+            ],
+        )
+        task = store.approve_papers(task["id"], "alice", ["p1", "p2", "p3"])
+
+        # Simulate Worker: p1 fetched OK, p2 PDF unavailable, p3 fetched but parse error
+        store.update_paper_status("p1", "fetched")
+        store.update_paper_status("p2", "degraded", error="PDF unavailable")
+        store.update_paper_status("p3", "fetched")
+        store.update_paper_status("p3", "degraded", error="parse error: missing pages")
+
+        papers = store.list_papers(task["id"], "alice")
+        statuses = {p["id"]: p["paper_status"] for p in papers}
+        assert statuses["p1"] == "fetched"
+        assert statuses["p2"] == "degraded"
+        assert statuses["p3"] == "degraded"
+        # Task should still be running (not FAILED)
+        task = store.get_task(task["id"], "alice")
+        assert task["status"] not in {TaskStatus.FAILED}
+    finally:
+        import shutil
+
+        shutil.rmtree(tmp, ignore_errors=True)
