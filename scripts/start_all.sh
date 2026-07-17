@@ -11,6 +11,7 @@ export APP_ENV=test
 export AGENT_BACKEND="${AGENT_BACKEND:-pi}"
 export PI_COMMAND="${PI_COMMAND:-pi}"
 export PI_TIMEOUT_SECONDS="${PI_TIMEOUT_SECONDS:-300}"
+export WORKFLOW_DB_PATH="${WORKFLOW_DB_PATH:-$HOME/.agent_workflow/data/workflow.db}"
 
 echo "============================================"
 echo "  Agent Workflow — 全栈启动"

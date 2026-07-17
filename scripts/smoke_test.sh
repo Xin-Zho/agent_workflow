@@ -3,6 +3,7 @@
 # Requires: API on :8000, Worker running.
 
 API="http://127.0.0.1:8000"
+export WORKFLOW_DB_PATH="${WORKFLOW_DB_PATH:-$HOME/.agent_workflow/data/workflow.db}"
 
 echo "=== Workflow Smoke Test ==="
 echo ""

@@ -17,9 +17,11 @@ from workflow_engine import (
 )
 
 
+from pathlib import Path
+
 DEFAULT_DB_PATH = os.environ.get(
     "WORKFLOW_DB_PATH",
-    os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "workflow.db"),
+    str(Path.home() / ".agent_workflow" / "data" / "workflow.db"),
 )
 
 
