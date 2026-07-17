@@ -111,3 +111,46 @@ def test_auth_token_invalid_token():
         headers={"Authorization": "Bearer invalidtoken"},
     )
     assert resp.status_code == 401
+
+
+def test_admin_can_approve_others_papers():
+    """Admin user can approve papers on another user's task."""
+    # Create as alice
+    resp_a = client.post("/api/auth/token", json={"user_id": "alice", "password": "test-pass"})
+    token_a = resp_a.json()["access_token"]
+    create = client.post(
+        "/api/research/tasks",
+        json={"title": "x", "query": "y"},
+        headers={"Authorization": f"Bearer {token_a}"},
+    )
+    task_id = create.json()["id"]
+    # Submit definition and start
+    client.put(
+        f"/api/research/tasks/{task_id}/definition",
+        json={
+            "definition": {
+                "research_object": "x",
+                "application": "y",
+                "target_metrics": [],
+                "hard_constraints": [],
+                "optimization_objectives": [],
+                "acceptable_tradeoffs": [],
+            }
+        },
+        headers={"Authorization": f"Bearer {token_a}"},
+    )
+    client.post(f"/api/research/tasks/{task_id}/start", headers={"Authorization": f"Bearer {token_a}"})
+    client.post(
+        f"/api/research/tasks/{task_id}/candidates",
+        json={"papers": [{"id": "p1", "title": "Test Paper", "role_tags": ["target_performance"]}]},
+        headers={"Authorization": f"Bearer {token_a}"},
+    )
+    # Admin approves
+    resp_adm = client.post("/api/auth/token", json={"user_id": "admin", "password": "admin-pass"})
+    token_adm = resp_adm.json()["access_token"]
+    approve = client.post(
+        f"/api/research/tasks/{task_id}/papers/approve",
+        json={"selected_ids": ["p1"]},
+        headers={"Authorization": f"Bearer {token_adm}"},
+    )
+    assert approve.status_code == 200

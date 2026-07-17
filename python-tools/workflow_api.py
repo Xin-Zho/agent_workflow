@@ -163,6 +163,27 @@ def create_workflow_router(
         except WorkflowError as exc:
             raise _handle_error(exc) from exc
 
+    @router.get("/tasks/{task_id}/reports")
+    async def get_reports(task_id: str, user: dict = Depends(auth_dependency)):
+        try:
+            store.get_task(task_id, user["sub"], _is_admin(user))
+            return {"reports": store.get_reports(task_id)}
+        except WorkflowError as exc:
+            raise _handle_error(exc) from exc
+
+    @router.get("/tasks/{task_id}/reports/{version}")
+    async def get_report(task_id: str, version: int, user: dict = Depends(auth_dependency)):
+        try:
+            store.get_task(task_id, user["sub"], _is_admin(user))
+            reports = store.get_reports(task_id)
+            for r in reports:
+                if r["version"] == version:
+                    with open(r["path"], encoding="utf-8") as f:
+                        return {"report": f.read(), "metadata": r}
+            raise HTTPException(status_code=404, detail=f"Report version {version} not found")
+        except WorkflowError as exc:
+            raise _handle_error(exc) from exc
+
     @router.post("/tasks/{task_id}/extractions", status_code=201)
     async def record_extraction(
         task_id: str, req: ExtractionCreate, user: dict = Depends(auth_dependency)
