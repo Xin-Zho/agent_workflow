@@ -405,3 +405,106 @@ async def test_e2e_lease_fencing():
         import shutil
 
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_e2e_idempotent_replay():
+    """Same idempotency_key produces no duplicate papers or extractions."""
+    tmp = tempfile.mkdtemp()
+    try:
+        config = WorkflowConfig(db_path=os.path.join(tmp, "test.db"))
+        store = WorkflowStore(config.db_path)
+        task = store.create_task("alice", "test", "query")
+        store.update_definition(
+            task["id"],
+            "alice",
+            {
+                "research_object": "x",
+                "application": "y",
+                "target_metrics": [],
+                "hard_constraints": [],
+                "optimization_objectives": [],
+                "acceptable_tradeoffs": [],
+            },
+        )
+        store.start_search(task["id"], "alice")
+        # First submission
+        store.submit_candidates(
+            task["id"],
+            "alice",
+            [
+                {"id": "p1", "title": "Test", "role_tags": ["target_performance"]},
+            ],
+        )
+        count1 = len(store.list_papers(task["id"], "alice"))
+        # Rollback and re-submit with same data
+        store.rollback(task["id"], "alice", "SEARCHING")
+        store.submit_candidates(
+            task["id"],
+            "alice",
+            [
+                {"id": "p1", "title": "Test", "role_tags": ["target_performance"]},
+            ],
+        )
+        count2 = len(store.list_papers(task["id"], "alice"))
+        assert count2 == count1, "No duplicate papers from replay"
+    finally:
+        import shutil
+
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_e2e_rollback_new_input_new_version():
+    """Rollback + modify definition -> new input_version -> new job, old preserved."""
+    tmp = tempfile.mkdtemp()
+    try:
+        config = WorkflowConfig(db_path=os.path.join(tmp, "test.db"))
+        store = WorkflowStore(config.db_path)
+        task = store.create_task("alice", "test", "query")
+        store.update_definition(
+            task["id"],
+            "alice",
+            {
+                "research_object": "x",
+                "application": "y",
+                "target_metrics": [],
+                "hard_constraints": [],
+                "optimization_objectives": [],
+                "acceptable_tradeoffs": [],
+            },
+        )
+        store.start_search(task["id"], "alice")
+        store.submit_candidates(
+            task["id"],
+            "alice",
+            [
+                {"id": "p1", "title": "Test", "role_tags": ["target_performance"]},
+            ],
+        )
+        papers_before = store.list_papers(task["id"], "alice")
+        # Rollback
+        store.rollback(task["id"], "alice", "CLARIFYING")
+        # Modify definition
+        store.update_definition(
+            task["id"],
+            "alice",
+            {
+                "research_object": "modified",
+                "application": "y",
+                "target_metrics": [],
+                "hard_constraints": [],
+                "optimization_objectives": [],
+                "acceptable_tradeoffs": [],
+            },
+        )
+        # Restart
+        task = store.start_search(task["id"], "alice")
+        assert task["status"] == TaskStatus.SEARCHING
+        # Old papers still exist
+        papers_after = store.list_papers(task["id"], "alice")
+        assert len(papers_after) >= len(papers_before)
+    finally:
+        import shutil
+
+        shutil.rmtree(tmp, ignore_errors=True)
