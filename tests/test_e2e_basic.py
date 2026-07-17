@@ -19,8 +19,9 @@ sys.path.insert(0, os.path.join(ROOT, "python-tools"))
 
 from workflow_engine import WorkflowStore, TaskStatus, PermissionDeniedError  # noqa: E402
 from workflow_config import WorkflowConfig  # noqa: E402
-from workflow_models import SearchQuery  # noqa: E402
+from workflow_models import SearchQuery, TaskDefinition  # noqa: E402
 from adapters.mock_search import MockSearchProvider  # noqa: E402
+from adapters.mock_agent import MockAgentAdapter  # noqa: E402
 
 
 @pytest.mark.asyncio
@@ -508,3 +509,47 @@ async def test_e2e_rollback_new_input_new_version():
         import shutil
 
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_e2e_mixed_evidence_per_field():
+    """One extraction has explicit ratios AND estimated performance AND missing modulus."""
+    import tempfile, os, json
+
+    tmp = tempfile.mkdtemp()
+    try:
+        config = WorkflowConfig(db_path=os.path.join(tmp, "test.db"))
+        store = WorkflowStore(config.db_path)
+        agent = MockAgentAdapter()
+        task_def = TaskDefinition(
+            research_object="x", application="y",
+            target_metrics=[], hard_constraints=[],
+            optimization_objectives=[], acceptable_tradeoffs=[],
+        )
+        samples = await agent.extract_paper(task_def, None)
+        assert len(samples) > 0
+        s = samples[0]
+        # Verify mixed evidence
+        ratio_sources = set()
+        for r in s.ratios:
+            for eid in r.evidence_ids:
+                for ev in s.evidence:
+                    if ev.evidence_id == eid:
+                        ratio_sources.add(ev.source_type)
+        perf_sources = set()
+        for pm in s.performance_metrics:
+            for eid in pm.evidence_ids:
+                for ev in s.evidence:
+                    if ev.evidence_id == eid:
+                        perf_sources.add(ev.source_type)
+        # Ratios should include "explicit"
+        assert "explicit" in ratio_sources, f"Ratios should have explicit evidence, got {ratio_sources}"
+        # Performance should include different types (estimated)
+        assert len(perf_sources) > 0
+        # Verify evidence is per-field, not per-extraction
+        assert ratio_sources != perf_sources, (
+            f"Ratio sources {ratio_sources} and perf sources {perf_sources} "
+            f"should differ (per-field evidence)"
+        )
+    finally:
+        import shutil; shutil.rmtree(tmp, ignore_errors=True)
