@@ -534,14 +534,14 @@ class WorkflowStore:
         """Worker-facing deterministic advance between automated stages."""
         task = self.get_task(task_id, actor_id)
         target_status = TaskStatus(target)
-        allowed = {
-            TaskStatus.FETCHING_FULLTEXT: TaskStatus.PARSING,
-            TaskStatus.PARSING: TaskStatus.READING,
-            TaskStatus.READING: TaskStatus.EXTRACTING,
-            TaskStatus.EXTRACTING: TaskStatus.VALIDATING,
-            TaskStatus.VALIDATING: TaskStatus.GENERATING_REPORT,
+        allowed: dict[TaskStatus, set[TaskStatus]] = {
+            TaskStatus.FETCHING_FULLTEXT: {TaskStatus.PARSING},
+            TaskStatus.PARSING: {TaskStatus.READING, TaskStatus.EXTRACTING},  # fast-path: READING handler not yet
+            TaskStatus.READING: {TaskStatus.EXTRACTING},
+            TaskStatus.EXTRACTING: {TaskStatus.VALIDATING},
+            TaskStatus.VALIDATING: {TaskStatus.GENERATING_REPORT},
         }
-        if allowed.get(TaskStatus(task["status"])) != target_status:
+        if target_status not in allowed.get(TaskStatus(task["status"]), set()):
             raise InvalidTransitionError(f"Cannot advance {task['status']} to {target_status}")
         return self._transition(task, actor_id, target_status, "stage_advanced", enqueue=True)
 

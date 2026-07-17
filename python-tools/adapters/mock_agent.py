@@ -28,7 +28,7 @@ class MockAgentAdapter:
             decisions.append(ScreeningDecision(
                 paper=p,
                 include=include,
-                role_tags=p.get("role_tags", []),
+                role_tags=[],
                 reason="mock screening",
             ))
         return decisions
