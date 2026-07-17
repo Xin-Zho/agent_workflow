@@ -28,6 +28,7 @@ from adapters.mock_embedding import MockEmbeddingRetriever, MockReranker  # noqa
 from adapters.mock_parser import MockDocumentParser  # noqa: E402
 from pipeline.search_stage import run_search_stage  # noqa: E402
 from pipeline.screening_stage import run_screening_stage  # noqa: E402
+from pipeline.reading_stage import run_reading_stage  # noqa: E402
 from pipeline.fulltext_stage import run_fulltext_stage  # noqa: E402
 from pipeline.parse_stage import run_parse_stage  # noqa: E402
 from pipeline.extraction_stage import run_extraction_stage  # noqa: E402
@@ -575,8 +576,9 @@ async def test_e2e_real_worker_smoke():
 
       SEARCHING -> (worker runs) -> WAITING_PAPER_APPROVAL -> alice approves
       -> FETCHING_FULLTEXT -> (worker runs) -> PARSING -> (worker runs)
-      -> EXTRACTING -> (worker runs) -> VALIDATING -> (worker runs)
-      -> GENERATING_REPORT -> (worker runs) -> WAITING_DATA_REVIEW
+      -> READING -> (worker runs) -> EXTRACTING -> (worker runs)
+      -> VALIDATING -> (worker runs) -> GENERATING_REPORT
+      -> (worker runs) -> WAITING_DATA_REVIEW
 
     The test MUST NOT call store.advance() or store.record_extraction()
     directly, and it MUST NOT use "worker" as the actor_id for user API calls.
@@ -629,6 +631,13 @@ async def test_e2e_real_worker_smoke():
             FunctionStageHandler(
                 "PARSING",
                 lambda ctx, job, s: run_parse_stage(ctx, job, s, parser),
+            ),
+        )
+        registry.register(
+            "READING",
+            FunctionStageHandler(
+                "READING",
+                lambda ctx, job, s: run_reading_stage(ctx, job, s),
             ),
         )
         registry.register(
