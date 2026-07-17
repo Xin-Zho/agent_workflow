@@ -376,9 +376,11 @@ WHEN NEW.stage IN (
     'CLARIFYING', 'DRAFT', 'COMPLETED', 'FAILED', 'PAUSED'
 )
 BEGIN
-    SELECT RAISE(ABORT, 'Cannot create job for human-wait/terminal stage: ' || NEW.stage);
+    SELECT RAISE(ABORT, 'cannot create job for human-wait or terminal stage');
 END;
 ```
+
+The specific stage value is logged by the Store layer before the INSERT is attempted. Using a fixed error text avoids compatibility issues with SQLite builds that do not support dynamic expressions in `RAISE()`.
 
 **Layer 2 — Store layer:** The `_transition()` method in WorkflowStore MUST NOT create a job row when the target status is a human-wait or terminal stage. This catches the error at the Python level before it reaches the database.
 
@@ -739,27 +741,54 @@ SELECT path FROM reports WHERE task_id = ? AND version = ?;
 
 ### 11.2 Atomic Write + Overwrite Prevention
 
+**UUID-based paths** use `os.link()` which is atomic and fails if the target already exists:
+
 ```python
-def atomic_write_unique(path: str, content: str | bytes) -> str:
-    """Write to a temp file, fsync, then atomically rename to final path.
-    Raises FileExistsError if the final path already exists — never overwrite."""
-    tmp_path = f"{path}.tmp.{uuid.uuid4().hex}"
-    mode = "wb" if isinstance(content, bytes) else "w"
-    with open(tmp_path, mode) as f:
-        f.write(content)
-        f.flush()
-        os.fsync(f.fileno())
-    # os.rename on Linux is atomic; on Windows, os.replace is atomic
+import hashlib
+
+def publish_unique(tmp_path: str, final_path: str, expected_sha256: str | None = None) -> str:
+    """Publish a tmp file to an immutable final path. Never overwrites.
+
+    - UUID-named paths: os.link() fails with FileExistsError if target exists.
+    - Content-addressed paths: if target exists, verify SHA-256. Reuse if match;
+      raise FileExistsError if mismatch.
+    """
+    if expected_sha256:
+        actual = _sha256_file(tmp_path)
+        if actual != expected_sha256:
+            raise ValueError(f"SHA-256 mismatch: expected {expected_sha256}, got {actual}")
+
+    if os.path.exists(final_path):
+        if expected_sha256:
+            existing = _sha256_file(final_path)
+            if existing == expected_sha256:
+                # Identical content already exists — reuse, clean up tmp
+                os.unlink(tmp_path)
+                return final_path
+        raise FileExistsError(f"Artifact already exists: {final_path}")
+
     try:
-        os.rename(tmp_path, path)
-    except OSError:
-        # If target already exists (another Worker wrote it), clean up tmp and raise
+        os.link(tmp_path, final_path)  # hard link — atomic, fails if target exists
+    except FileExistsError:
         os.unlink(tmp_path)
-        raise FileExistsError(f"Artifact already exists: {path}")
-    return path
+        raise
+    os.unlink(tmp_path)  # remove temp link; final_path retains the inode
+    return final_path
+
+
+def _sha256_file(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
 ```
 
-**Key rule:** Artifact files are NEVER overwritten. If two Workers both produce output for the same logical artifact (e.g., a report for task T, version 1), they write to **different** content-addressed paths. The database transaction (which IS fenced by `worker_id` + `lease_token`) determines which path becomes the authoritative artifact. The losing Worker's file becomes an orphan on disk and is cleaned up later by reconciliation.
+**Key rules:**
+- Artifact files are NEVER overwritten. Two Workers producing output for the same logical artifact write to different paths.
+- Content-addressed paths with matching hashes are reused (idempotent write).
+- The database transaction (fenced by `worker_id` + `lease_token`) determines which path is authoritative.
+- The losing Worker's file becomes an orphan; periodic reconciliation cleans it up.
 
 ### 11.3 Filesystem/DB Non-Atomicity
 
@@ -921,6 +950,19 @@ class WorkflowWorker:
                     worker_id=self.config.worker_id,
                     lease_token=job["lease_token"],
                     error=str(e),
+                )
+            except asyncio.CancelledError:
+                # Process shutdown — do NOT retry; let the lease expire naturally
+                raise
+            except Exception as e:
+                # Unexpected failure (ValueError, OSError, library exception, etc.)
+                # Retry via the normal path; max_attempts will catch persistent failures
+                logger.exception("Unexpected stage failure for job %s", job["id"])
+                self.store.retry_job(
+                    job_id=job["id"],
+                    worker_id=self.config.worker_id,
+                    lease_token=job["lease_token"],
+                    error=f"unexpected: {e}",
                 )
             finally:
                 # Ensure all tasks are cleaned up
