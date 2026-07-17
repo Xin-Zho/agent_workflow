@@ -17,7 +17,7 @@ import pytest
 ROOT = os.path.dirname(os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(ROOT, "python-tools"))
 
-from workflow_engine import WorkflowStore, TaskStatus  # noqa: E402
+from workflow_engine import WorkflowStore, TaskStatus, PermissionDeniedError  # noqa: E402
 from workflow_config import WorkflowConfig  # noqa: E402
 from workflow_models import SearchQuery  # noqa: E402
 from adapters.mock_search import MockSearchProvider  # noqa: E402
@@ -188,6 +188,90 @@ async def test_e2e_happy_path():
         assert "task_created" in event_types
         assert "data_reviewed" in event_types
 
+    finally:
+        import shutil
+
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_e2e_user_isolation():
+    """Alice creates task; Bob cannot access it."""
+    tmp = tempfile.mkdtemp()
+    try:
+        config = WorkflowConfig(db_path=os.path.join(tmp, "test.db"))
+        store = WorkflowStore(config.db_path)
+        alice_task = store.create_task("alice", "alice secret", "private research")
+        # Bob cannot read
+        with pytest.raises(PermissionDeniedError):
+            store.get_task(alice_task["id"], "bob")
+        # Bob's list is empty
+        assert store.list_tasks("bob") == []
+        # Admin can read
+        task = store.get_task(alice_task["id"], "admin", is_admin=True)
+        assert task["title"] == "alice secret"
+    finally:
+        import shutil
+
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_e2e_human_gates_owner_and_admin():
+    """Owner AND admin can approve papers and review extractions."""
+    tmp = tempfile.mkdtemp()
+    try:
+        config = WorkflowConfig(db_path=os.path.join(tmp, "test.db"))
+        store = WorkflowStore(config.db_path)
+        # Setup: task at WAITING_PAPER_APPROVAL
+        task = store.create_task("alice", "test", "query")
+        store.update_definition(
+            task["id"],
+            "alice",
+            {
+                "research_object": "x",
+                "application": "y",
+                "target_metrics": [],
+                "hard_constraints": [],
+                "optimization_objectives": [],
+                "acceptable_tradeoffs": [],
+            },
+        )
+        store.start_search(task["id"], "alice")
+        store.submit_candidates(
+            task["id"],
+            "alice",
+            [
+                {"id": "p1", "title": "Test", "role_tags": ["target_performance"]},
+            ],
+        )
+        # Admin approves
+        task = store.approve_papers(task["id"], "admin", ["p1"], is_admin=True)
+        assert task["status"] == TaskStatus.FETCHING_FULLTEXT
+        # Non-owner, non-admin cannot
+        task2 = store.create_task("alice", "test2", "query2")
+        store.update_definition(
+            task2["id"],
+            "alice",
+            {
+                "research_object": "x",
+                "application": "y",
+                "target_metrics": [],
+                "hard_constraints": [],
+                "optimization_objectives": [],
+                "acceptable_tradeoffs": [],
+            },
+        )
+        store.start_search(task2["id"], "alice")
+        store.submit_candidates(
+            task2["id"],
+            "alice",
+            [
+                {"id": "p1", "title": "Test", "role_tags": ["target_performance"]},
+            ],
+        )
+        with pytest.raises(PermissionDeniedError):
+            store.approve_papers(task2["id"], "bob", ["p1"])
     finally:
         import shutil
 
