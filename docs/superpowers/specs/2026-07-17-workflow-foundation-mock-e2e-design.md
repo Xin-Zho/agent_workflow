@@ -45,44 +45,45 @@ Non-goals for this spec: production auth (OAuth/LDAP), real IEEE/WoS integration
 | 8 | Minimal per-paper status (7 states) | `workflow_engine.py` (modify) |
 | 9 | Human-gate constraints (DB-level prevention of jobs for wait states) | `workflow_engine.py` (modify) |
 | 10 | Input validation + idempotency_key UNIQUE constraint | `workflow_engine.py`, `workflow_api.py` (modify) |
+| 11 | Basic auth (test credentials, JWT with role, owner/admin checks) | `web_api_server.py` (modify) |
 
 ### Phase 2A — Mock Happy-Path E2E
 
 | # | Deliverable | Files |
 |---|------------|-------|
-| 11 | Mock SearchProvider | `adapters/mock_search.py` (new) |
-| 12 | Mock EmbeddingRetriever | `adapters/mock_embedding.py` (new) |
-| 13 | Mock Reranker | `adapters/mock_embedding.py` |
-| 14 | Mock FulltextProvider | `adapters/mock_search.py` |
-| 15 | Mock DocumentParser | `adapters/mock_parser.py` (new) |
-| 16 | Mock AgentAdapter (mixed evidence per field) | `adapters/mock_agent.py` (new) |
-| 17 | Markdown ReportGenerator | `pipeline/report_stage.py` (new) |
-| 18 | Stage handlers (search, screening, parse, extract, validate, report) | `pipeline/*.py` (new) |
-| 19 | E2E test suite (12 scenarios) | `tests/test_e2e_basic.py` (new) |
-| 20 | Test fixtures (papers.json, sample PDF, mock extraction) | `fixtures/` (new) |
-| 21 | `scripts/run_basic_test.sh` | `scripts/run_basic_test.sh` (new) |
+| 12 | Mock SearchProvider | `adapters/mock_search.py` (new) |
+| 13 | Mock EmbeddingRetriever | `adapters/mock_embedding.py` (new) |
+| 14 | Mock Reranker | `adapters/mock_embedding.py` |
+| 15 | Mock FulltextProvider | `adapters/mock_search.py` |
+| 16 | Mock DocumentParser | `adapters/mock_parser.py` (new) |
+| 17 | Mock AgentAdapter (mixed evidence per field) | `adapters/mock_agent.py` (new) |
+| 18 | Markdown ReportGenerator | `pipeline/report_stage.py` (new) |
+| 19 | Stage handlers (search, screening, parse, extract, validate, report) | `pipeline/*.py` (new) |
+| 20 | E2E test suite (12 scenarios) | `tests/test_e2e_basic.py` (new) |
+| 21 | Test fixtures (papers.json, sample PDF, mock extraction) | `fixtures/` (new) |
+| 22 | `scripts/run_basic_test.sh` | `scripts/run_basic_test.sh` (new) |
 
 ### Phase 1B — Foundation Hardening
 
 | # | Deliverable |
 |---|------------|
-| 22 | Auth hardening (credentials, JWT role, ownership checks) |
-| 23 | Full per-paper status (14 states) with error tracking |
-| 24 | Validation stage (unit checks, ratio basis, page/figure locator, inferred-value guard) |
-| 25 | Rollback constraints (direction check, artifact superseding, human-gate re-entry) |
-| 26 | Job recovery (heartbeat, lease expiry, exponential backoff, max retry, dead letter) |
-| 27 | User memory isolation (per-user MemoryManager, per-task context, reviewed-only sharing) |
+| 23 | Auth hardening (password hashing, key rotation, token lifetime, admin role backend) |
+| 24 | Full per-paper status (14 states) with error tracking |
+| 25 | Validation stage (unit checks, ratio basis, page/figure locator, inferred-value guard) |
+| 26 | Rollback constraints (direction check, artifact superseding, human-gate re-entry) |
+| 27 | Job recovery (heartbeat, lease expiry, exponential backoff, max retry, dead letter) |
+| 28 | User memory isolation (per-user MemoryManager, per-task context, reviewed-only sharing) |
 
 ### Phase 2B — Resilience & Multi-User E2E
 
 | # | Test Scenario |
 |---|--------------|
-| 28 | Single paper failure — others continue, report marks evidence level |
-| 29 | Worker crash mid-stage — lease expires, old Worker fenced, new Worker resumes |
-| 30 | Two users — isolation, FIFO fairness, no cross-access |
-| 31 | Human gates — Worker waits, owner reviews, admin reviews, non-owner blocked |
-| 32 | Idempotent replay — same key produces no duplicates |
-| 33 | Concurrent API+Worker startup — migration runs exactly once |
+| 29 | Single paper failure — others continue, report marks evidence level |
+| 30 | Worker crash mid-stage — lease expires, old Worker fenced, new Worker resumes |
+| 31 | Two users — isolation, FIFO fairness, no cross-access |
+| 32 | Human gates — Worker waits, owner reviews, admin reviews, non-owner blocked |
+| 33 | Idempotent replay — same key produces no duplicates |
+| 34 | Concurrent API+Worker startup — migration runs exactly once |
 
 ## 4. Architecture
 
@@ -184,13 +185,13 @@ class EvidenceLocator(BaseModel):
 class TaskDefinition(BaseModel):
     research_object: str
     application: str
-    target_metrics: list[Metric]
-    hard_constraints: list[str]
-    optimization_objectives: list[str]
-    acceptable_tradeoffs: list[str]
+    target_metrics: list[Metric] = Field(default_factory=list)
+    hard_constraints: list[str] = Field(default_factory=list)
+    optimization_objectives: list[str] = Field(default_factory=list)
+    acceptable_tradeoffs: list[str] = Field(default_factory=list)
     paper_target: int = Field(ge=5, le=200)
-    languages: list[str] = ["zh", "en"]
-    temporary_lab_constraints: list[str] = []
+    languages: list[str] = Field(default_factory=lambda: ["zh", "en"])
+    temporary_lab_constraints: list[str] = Field(default_factory=list)
 
 class Metric(BaseModel):
     name: str
@@ -220,38 +221,38 @@ class CompositionRatio(BaseModel):
     ratio_basis: RatioBasis = RatioBasis.UNSPECIFIED
     normalized_value: float | None = None
     normalized_unit: str | None = None
-    evidence_ids: list[str] = []  # references EvidenceLocator.evidence_id
+    evidence_ids: list[str] = Field(default_factory=list)
 
 class ProcessStep(BaseModel):
     step_number: int
     description: str
-    parameters: dict[str, Any]
+    parameters: dict[str, Any] = Field(default_factory=dict)
     equipment: str | None = None
-    evidence_ids: list[str] = []
+    evidence_ids: list[str] = Field(default_factory=list)
 
 class TestCondition(BaseModel):
     property: str
     method: str | None = None
     standard: str | None = None
-    parameters: dict[str, Any]
-    evidence_ids: list[str] = []
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    evidence_ids: list[str] = Field(default_factory=list)
 
 class PerformanceMetric(BaseModel):
     property: str
     value: str
     unit: str
     test_condition: str | None = None
-    evidence_ids: list[str] = []
+    evidence_ids: list[str] = Field(default_factory=list)
 
 class SampleExtraction(BaseModel):
     sample_id: str
-    components: list[MaterialComponent]
-    ratios: list[CompositionRatio]
-    process_steps: list[ProcessStep]
-    test_conditions: list[TestCondition]
-    performance_metrics: list[PerformanceMetric]
-    evidence: list[EvidenceLocator]  # all evidence items referenced by evidence_ids above
-    is_abstract_only: bool = False  # True → cannot enter quantitative comparison
+    components: list[MaterialComponent] = Field(default_factory=list)
+    ratios: list[CompositionRatio] = Field(default_factory=list)
+    process_steps: list[ProcessStep] = Field(default_factory=list)
+    test_conditions: list[TestCondition] = Field(default_factory=list)
+    performance_metrics: list[PerformanceMetric] = Field(default_factory=list)
+    evidence: list[EvidenceLocator] = Field(default_factory=list)
+    is_abstract_only: bool = False
 
 class ParsedBlock(BaseModel):
     """A stable text block within a parsed page."""
@@ -263,15 +264,15 @@ class ParsedBlock(BaseModel):
 
 class ParsedPage(BaseModel):
     page_number: int
-    blocks: list[ParsedBlock]
-    captions: list[str]
-    tables: list[dict[str, Any]]
+    blocks: list[ParsedBlock] = Field(default_factory=list)
+    captions: list[str] = Field(default_factory=list)
+    tables: list[dict[str, Any]] = Field(default_factory=list)
 
 class ParsedDocument(BaseModel):
     work_id: str
     file_version: str
-    pages: list[ParsedPage]
-    metadata: dict[str, Any]
+    pages: list[ParsedPage] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 class ResearchReport(BaseModel):
     task_id: str
@@ -287,17 +288,20 @@ class ReportSection(BaseModel):
 
 ### 5.3 Work and Version Model
 
-Papers are identified by a stable `work_id` (e.g. `doi:10.1000/example`). Versions (preprint, journal, corrigendum) are separate entities under the same work:
+Papers are identified by a stable `work_id` (e.g. `doi:10.1000/example`). Multiple versions (preprints, journal publications, corrigenda) can exist under the same work. Two fields distinguish them:
 
 ```python
-class WorkVersion(StrEnum):
+class VersionType(StrEnum):
     PREPRINT = "preprint"
     JOURNAL = "journal"
     CORRIGENDUM = "corrigendum"
     UNKNOWN = "unknown"
 ```
 
-The `papers` table's `version_id` field uses this enum, not free text.
+- `version_type`: The kind of version (preprint, journal, corrigendum).
+- `version_id`: A stable identifier for this specific version (e.g., arXiv v3, publisher DOI with version suffix, or a content hash). This is NOT free text — it is deterministic and stable across re-ingestion of the same file.
+
+The `papers` table stores both `version_type` and `version_id` as separate columns. The `EvidenceLocator.file_version` references `version_id`.
 
 ### 5.4 Paper Status (7 states for Phase 1A)
 
@@ -339,7 +343,7 @@ CLARIFYING               → DRAFT                    update_definition       no
 DRAFT                    → SEARCHING                start_search            yes           owner
 SEARCHING                → SCREENING                Worker stage complete   yes           Worker
 SCREENING                → WAITING_PAPER_APPROVAL   Worker stage complete   no            Worker
-WAITING_PAPER_APPROVAL   → FETCHING_FULLTEXT        approve_papers          yes           owner
+WAITING_PAPER_APPROVAL   → FETCHING_FULLTEXT        approve_papers          yes           owner/admin
 FETCHING_FULLTEXT        → PARSING                  Worker stage complete   yes           Worker
 PARSING                  → READING                  Worker stage complete   yes           Worker
 READING                  → EXTRACTING               Worker stage complete   yes           Worker
@@ -360,11 +364,25 @@ Any                      → DEGRADED                 partial failure         no
 *rollback creates a job only if the target is an automated pipeline stage.
 *rollback targets must be earlier in the pipeline than current status.
 
-### 6.2 Human-Gate Enforcement (Two Layers)
+### 6.2 Human-Gate Enforcement (Three Layers)
 
-**Layer 1 — Database:** The `_transition()` method MUST NOT create a job row when the target status is in `{WAITING_PAPER_APPROVAL, WAITING_DATA_REVIEW, CLARIFYING, DRAFT, COMPLETED, FAILED, PAUSED}`. The Worker should never find a job for these stages, but the database constraint is the safety net.
+**Layer 1 — Database trigger:** A SQL trigger prevents INSERT of any job row whose `stage` is a human-wait or terminal stage. This is the safety net — even direct SQL cannot bypass it.
 
-**Layer 2 — Worker:** The StageRegistry has no handlers registered for human-wait stages. If a job for one somehow exists, the Worker treats it as a `FatalError` (do not retry, do not silently skip — log and dead-letter).
+```sql
+CREATE TRIGGER IF NOT EXISTS trg_jobs_no_human_wait_stage
+BEFORE INSERT ON jobs
+WHEN NEW.stage IN (
+    'WAITING_PAPER_APPROVAL', 'WAITING_DATA_REVIEW',
+    'CLARIFYING', 'DRAFT', 'COMPLETED', 'FAILED', 'PAUSED'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'Cannot create job for human-wait/terminal stage: ' || NEW.stage);
+END;
+```
+
+**Layer 2 — Store layer:** The `_transition()` method in WorkflowStore MUST NOT create a job row when the target status is a human-wait or terminal stage. This catches the error at the Python level before it reaches the database.
+
+**Layer 3 — Worker:** The StageRegistry has no handlers registered for human-wait stages. If a job for one somehow exists (e.g., from a migration bug or schema version mismatch), the Worker treats it as a `FatalError` (do not retry, do not silently skip — log and dead-letter).
 
 ### 6.3 Job State Transitions
 
@@ -499,7 +517,7 @@ ALTER TABLE jobs ADD COLUMN idempotency_key TEXT;
 ALTER TABLE jobs ADD COLUMN result_json TEXT;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_idempotency
-    ON jobs(idempotency_key) WHERE status IN ('completed', 'running');
+    ON jobs(idempotency_key) WHERE idempotency_key IS NOT NULL;
 ```
 
 **papers table — new columns:**
@@ -507,8 +525,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_idempotency
 ALTER TABLE papers ADD COLUMN paper_status TEXT NOT NULL DEFAULT 'candidate';
 ALTER TABLE papers ADD COLUMN error_message TEXT;
 ALTER TABLE papers ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE papers ADD COLUMN version_id TEXT NOT NULL DEFAULT 'unknown';
--- version_id uses WorkVersion enum: preprint, journal, corrigendum, unknown
+ALTER TABLE papers ADD COLUMN version_type TEXT NOT NULL DEFAULT 'unknown';
+-- version_type: preprint, journal, corrigendum, unknown
+ALTER TABLE papers ADD COLUMN version_id TEXT NOT NULL DEFAULT '';
+-- version_id: stable identifier (arXiv v3, DOI suffix, content hash)
 ```
 
 **tasks table — new column:**
@@ -587,18 +607,31 @@ UPDATE jobs SET
     claimed_at = ?,
     lease_expires_at = datetime(?, '+' || ? || ' seconds'),
     lease_token = ?,
-    attempts = CASE WHEN status = 'retry_wait' THEN attempts + 1 ELSE attempts END
+    attempts = attempts + 1
 WHERE id = (
     SELECT id FROM jobs
-    WHERE status = 'queued'
+    WHERE (status = 'queued')
        OR (status = 'running' AND lease_expires_at < datetime('now'))
        OR (status = 'retry_wait' AND next_retry_at <= datetime('now'))
     ORDER BY id LIMIT 1
 )
+AND attempts < max_attempts
 RETURNING *
 ```
 
-Note: `attempts` counts executions (not retries). Maximum 3 executions: first attempt, +5s retry, +30s retry, then dead_letter.
+If no row is returned because all candidates have `attempts >= max_attempts`, the Worker calls `_promote_dead_letters()` to move those overdue `retry_wait` and lease-expired `running` jobs to `dead_letter`, then retries the claim.
+
+```sql
+-- _promote_dead_letters: move maxed-out or expired jobs to dead_letter
+UPDATE jobs SET status = 'dead_letter', updated_at = ?
+WHERE (status = 'retry_wait' AND next_retry_at <= datetime('now') AND attempts >= max_attempts)
+   OR (status = 'running' AND lease_expires_at < datetime('now') AND attempts >= max_attempts);
+```
+
+Key rules:
+- `attempts` is ALWAYS incremented on claim, regardless of prior status.
+- `attempts < max_attempts` is checked BEFORE claiming; maxed-out jobs go to `dead_letter`.
+- First execution: `attempts` goes from 0 → 1. First retry: 1 → 2 (after 5s). Second retry: 2 → 3 (after 30s). After 3: → `dead_letter`.
 
 ## 9. Transaction Boundaries
 
@@ -641,13 +674,14 @@ Where `input_version` is the version identifier for the inputs to this stage. It
 
 ### 10.2 UNIQUE Constraint
 
-The `jobs` table has a partial unique index:
+The `jobs` table has an unconditional unique index (excluding NULLs):
+
 ```sql
 CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_idempotency
-    ON jobs(idempotency_key) WHERE status IN ('completed', 'running');
+    ON jobs(idempotency_key) WHERE idempotency_key IS NOT NULL;
 ```
 
-This enforces at the database level that two jobs with the same idempotency key cannot both be active or completed.
+This prevents two job rows from sharing the same idempotency key in ANY status — queued, running, completed, or otherwise. Retries reuse the same job row; a genuinely new execution requires a new `input_version` → new `idempotency_key`.
 
 ### 10.3 Semantic Rules
 
@@ -679,39 +713,69 @@ After attempts=3 failure → status = 'dead_letter'
 
 ### 11.1 Directory Layout
 
+Artifact filenames are **immutable and unique** — they embed a content hash or artifact UUID so that no two writes ever target the same path. Reports use version numbers for human readability but the underlying file is content-addressed.
+
 ```
 data/tasks/<task_id>/
 ├── search/
-│   └── results.json
+│   └── <uuid>.json
 ├── papers/
 │   ├── <paper_id>/
-│   │   ├── fulltext.pdf
-│   │   └── metadata.json
+│   │   ├── fulltext_<sha256>.pdf
+│   │   └── metadata_<uuid>.json
 ├── parsed/
-│   └── <paper_id>.json
+│   └── <paper_id>_<uuid>.json
 ├── extractions/
-│   └── <paper_id>_v<version>.json
+│   └── <paper_id>_<uuid>.json
 └── reports/
-    └── v<version>.md
+    └── <uuid>.md
 ```
 
-### 11.2 Atomic Write Pattern
+The `reports` DB table maps logical version numbers to artifact paths:
+
+```sql
+SELECT path FROM reports WHERE task_id = ? AND version = ?;
+```
+
+### 11.2 Atomic Write + Overwrite Prevention
 
 ```python
-def atomic_write(path: str, content: str | bytes) -> str:
+def atomic_write_unique(path: str, content: str | bytes) -> str:
+    """Write to a temp file, fsync, then atomically rename to final path.
+    Raises FileExistsError if the final path already exists — never overwrite."""
     tmp_path = f"{path}.tmp.{uuid.uuid4().hex}"
     mode = "wb" if isinstance(content, bytes) else "w"
     with open(tmp_path, mode) as f:
         f.write(content)
         f.flush()
         os.fsync(f.fileno())
-    os.rename(tmp_path, path)  # atomic on same filesystem
+    # os.rename on Linux is atomic; on Windows, os.replace is atomic
+    try:
+        os.rename(tmp_path, path)
+    except OSError:
+        # If target already exists (another Worker wrote it), clean up tmp and raise
+        os.unlink(tmp_path)
+        raise FileExistsError(f"Artifact already exists: {path}")
     return path
 ```
 
-### 11.3 Database Tracking
+**Key rule:** Artifact files are NEVER overwritten. If two Workers both produce output for the same logical artifact (e.g., a report for task T, version 1), they write to **different** content-addressed paths. The database transaction (which IS fenced by `worker_id` + `lease_token`) determines which path becomes the authoritative artifact. The losing Worker's file becomes an orphan on disk and is cleaned up later by reconciliation.
 
-Every artifact file has a corresponding row in the `artifacts` table. Reports additionally have a `reports` table row. The database stores paths and hashes — never file contents.
+### 11.3 Filesystem/DB Non-Atomicity
+
+The filesystem write and the database transaction are **NOT a single atomic unit**. The correct ordering is:
+
+```
+1. Write artifact file (atomic rename to immutable path)
+2. BEGIN IMMEDIATE (database transaction)
+3. INSERT/UPDATE artifact row (path, sha256) — fenced by worker_id + lease_token
+4. Update task/paper/job status
+5. COMMIT
+```
+
+If the process crashes between step 1 and step 2, the file is an orphan on disk (no DB row references it). If it crashes between step 4 and step 5, the transaction rolls back — the DB row is gone but the file remains. Orphan files are harmless (they waste disk space but don't affect correctness) and are cleaned up by a periodic reconciliation job.
+
+The reverse order (DB first, then file) must NOT be used — a crash after DB commit but before file write would leave a DB row pointing to a nonexistent file. File-first is the safer ordering.
 
 ## 12. Pipeline Contracts
 
@@ -780,49 +844,96 @@ class WorkflowWorker:
                 await asyncio.sleep(self.config.poll_interval)
                 continue
 
+            handler_task: asyncio.Task | None = None
+            renewal_task: asyncio.Task | None = None
+
+            async def run_handler():
+                handler = self.registry.get(job["stage"])
+                return await handler.run(job, self.store)
+
+            async def renew_or_die():
+                """Renew lease periodically; raise LeaseLostError if lease is invalidated."""
+                while True:
+                    await asyncio.sleep(self.config.renew_interval)
+                    renewed = self.store.renew_lease(
+                        job_id=job["id"],
+                        worker_id=self.config.worker_id,
+                        lease_token=job["lease_token"],
+                        lease_duration=self.config.lease_duration,
+                    )
+                    if not renewed:
+                        raise LeaseLostError(f"Lease lost for job {job['id']}")
+
             try:
-                # Start periodic renewal for long-running stages
-                renewal_task = asyncio.create_task(self._renew_loop(job))
-                handler = self.registry.get(job.stage)
-                result = await handler.run(job, self.store)
-                renewal_task.cancel()
+                handler_task = asyncio.create_task(run_handler())
+                renewal_task = asyncio.create_task(renew_or_die())
+
+                # Wait for either handler completion or lease loss
+                done, pending = await asyncio.wait(
+                    [handler_task, renewal_task],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+
+                # If renewal failed (lease lost) → cancel handler
+                if renewal_task in done:
+                    renewal_exc = renewal_task.exception()
+                    handler_task.cancel()
+                    try:
+                        await handler_task
+                    except asyncio.CancelledError:
+                        pass
+                    raise LeaseLostError(
+                        f"Lease lost for job {job['id']}"
+                    ) from renewal_exc
+
+                # Handler completed normally
+                for task in pending:
+                    task.cancel()
+                # Await cancellation of renewal task
+                if renewal_task in pending:
+                    try:
+                        await renewal_task
+                    except asyncio.CancelledError:
+                        pass
+
+                result = handler_task.result()
                 self.store.complete_job(
-                    job_id=job.id,
+                    job_id=job["id"],
                     worker_id=self.config.worker_id,
-                    lease_token=job.lease_token,
+                    lease_token=job["lease_token"],
                     result=result,
                 )
+
+            except LeaseLostError:
+                # Lease was lost — discard result, do NOT write to DB
+                # (fencing: the new Worker's lease_token won't match anyway)
+                pass
             except RetryableError as e:
-                renewal_task.cancel()
                 self.store.retry_job(
-                    job_id=job.id,
+                    job_id=job["id"],
                     worker_id=self.config.worker_id,
-                    lease_token=job.lease_token,
+                    lease_token=job["lease_token"],
                     error=str(e),
                 )
             except FatalError as e:
-                renewal_task.cancel()
                 self.store.fail_job(
-                    job_id=job.id,
+                    job_id=job["id"],
                     worker_id=self.config.worker_id,
-                    lease_token=job.lease_token,
+                    lease_token=job["lease_token"],
                     error=str(e),
                 )
-
-    async def _renew_loop(self, job: ClaimedJob):
-        """Renew lease every renew_interval seconds for long-running stages."""
-        while True:
-            await asyncio.sleep(self.config.renew_interval)
-            renewed = self.store.renew_lease(
-                job_id=job.id,
-                worker_id=self.config.worker_id,
-                lease_token=job.lease_token,
-                lease_duration=self.config.lease_duration,
-            )
-            if not renewed:
-                # Lease was invalidated — another Worker claimed this job
-                raise LeaseLostError(f"Lease lost for job {job.id}")
+            finally:
+                # Ensure all tasks are cleaned up
+                for task in [handler_task, renewal_task]:
+                    if task and not task.done():
+                        task.cancel()
+                        try:
+                            await task
+                        except (asyncio.CancelledError, Exception):
+                            pass
 ```
+
+**Blocking handler rule:** Any handler that performs blocking I/O (PDF parsing, subprocess calls, synchronous HTTP) MUST run that work in a thread or subprocess via `asyncio.to_thread()` or `loop.run_in_executor()`. Otherwise the event loop is blocked and cannot process the renewal timer — the lease will silently expire during long-running blocking calls.
 
 ### 13.2 Initial Constraints
 
@@ -955,8 +1066,8 @@ Papers without full text are marked `is_abstract_only = True` and `paper_status 
 
 - Each test creates a temporary SQLite database.
 - Fixtures are copied to a temp directory.
-- Worker runs in the same process as the test (synchronous polling loop).
-- Default lease timeout shortened to 5s for tests.
+- **Happy-path tests (#1–4, #7–12):** Worker runs in the same process as the test (synchronous polling loop). Default lease timeout shortened to 5s.
+- **Crash/recovery tests (#5–6):** Worker runs as a real subprocess (`subprocess.Popen`). The test sends `SIGTERM` to kill it mid-stage. This validates real lease expiry, fencing, and re-claim behavior that cannot be tested with an in-process Worker.
 - `scripts/run_basic_test.sh` orchestrates all tests and reports results.
 
 ### 16.2 Test Scenarios
