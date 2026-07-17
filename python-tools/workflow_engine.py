@@ -557,12 +557,27 @@ class WorkflowStore:
         task = self.get_task(task_id, actor_id)
         if task["status"] != TaskStatus.PAUSED or not task["previous_status"]:
             raise InvalidTransitionError("Task is not paused")
+        HUMAN_WAIT = {TaskStatus.WAITING_PAPER_APPROVAL, TaskStatus.WAITING_DATA_REVIEW,
+                      TaskStatus.CLARIFYING, TaskStatus.DRAFT, TaskStatus.COMPLETED,
+                      TaskStatus.FAILED, TaskStatus.PAUSED}
+        should_enqueue = TaskStatus(task["previous_status"]) not in HUMAN_WAIT
         return self._transition(task, actor_id, TaskStatus(task["previous_status"]),
-                                "task_resumed", enqueue=True)
+                                "task_resumed", enqueue=should_enqueue)
 
     def rollback(self, task_id: str, actor_id: str, target: str) -> dict[str, Any]:
         task = self.get_task(task_id, actor_id)
         target_status = TaskStatus(target)
+
+        def _stage_order(stage: TaskStatus) -> int:
+            try:
+                return ACTIVE_PIPELINE.index(stage)
+            except ValueError:
+                return -1
+
+        if _stage_order(target_status) >= _stage_order(TaskStatus(task["status"])):
+            raise InvalidTransitionError(
+                f"Rollback target {target} must be earlier than current {task['status']}"
+            )
         allowed_targets = set(ACTIVE_PIPELINE[:-1]) | {TaskStatus.CLARIFYING}
         if target_status not in allowed_targets:
             raise InvalidTransitionError("Invalid rollback target")
@@ -592,10 +607,12 @@ class WorkflowStore:
         now = utc_now()
         previous = task["status"]
         with self._connect() as conn:
-            conn.execute(
-                "UPDATE tasks SET status = ?, previous_status = ?, updated_at = ? WHERE id = ?",
-                (target, previous, now, task["id"]),
+            cur = conn.execute(
+                "UPDATE tasks SET status = ?, previous_status = ?, updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ?",
+                (target, previous, now, task["id"], task["revision"]),
             )
+            if cur.rowcount == 0:
+                raise InvalidTransitionError("Concurrent modification detected — retry")
             self._event(conn, task["id"], actor_id, event_type, previous, target, details)
             if enqueue:
                 conn.execute(

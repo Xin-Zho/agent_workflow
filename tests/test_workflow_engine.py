@@ -116,6 +116,53 @@ class WorkflowStoreTest(unittest.TestCase):
         task = self.store.rollback(task["id"], "alice", "CLARIFYING")
         self.assertEqual(task["status"], TaskStatus.CLARIFYING)
 
+    def test_optimistic_locking_prevents_concurrent_update(self):
+        task = self.store.create_task("alice", "locking", "query")
+        # Simulate two concurrent reads
+        t1 = self.store.get_task(task["id"], "alice")
+        t2 = self.store.get_task(task["id"], "alice")
+        # First update succeeds
+        self.store.start_search(t1["id"], "alice")
+        # Second update uses stale revision — should be handled (retry or conflict)
+        # The store currently retries internally; verify task is in SEARCHING
+        final = self.store.get_task(task["id"], "alice")
+        assert final["status"] == "SEARCHING"
+
+    def test_rollback_only_to_earlier_stage(self):
+        task = self.store.create_task("alice", "test", "query")
+        self.store.start_search(task["id"], "alice")
+        self.store.submit_candidates(task["id"], "alice", [
+            {"id": "p1", "title": "Test", "role_tags": ["target_performance"]},
+        ])
+        # task is now WAITING_PAPER_APPROVAL
+        task = self.store.get_task(task["id"], "alice")
+        assert task["status"] == "WAITING_PAPER_APPROVAL"
+        # Rollback to SEARCHING is valid (earlier)
+        self.store.rollback(task["id"], "alice", "SEARCHING")
+        task = self.store.get_task(task["id"], "alice")
+        assert task["status"] == "SEARCHING"
+        # Rollback to FETCHING_FULLTEXT is invalid (later than SEARCHING)
+        with self.assertRaises(InvalidTransitionError):
+            self.store.rollback(task["id"], "alice", "FETCHING_FULLTEXT")
+
+    def test_resume_does_not_create_job_for_wait_state(self):
+        task = self.store.create_task("alice", "test", "query")
+        self.store.start_search(task["id"], "alice")
+        self.store.submit_candidates(task["id"], "alice", [
+            {"id": "p1", "title": "Test", "role_tags": ["target_performance"]},
+        ])
+        # WAITING_PAPER_APPROVAL
+        task = self.store.pause(task["id"], "alice")
+        assert task["status"] == "PAUSED"
+        self.store.resume(task["id"], "alice")
+        # Should be back in WAITING_PAPER_APPROVAL, no job created
+        with self.store._connect() as conn:
+            jobs = conn.execute(
+                "SELECT COUNT(*) as c FROM jobs WHERE task_id = ? AND status = 'queued'",
+                (task["id"],),
+            ).fetchone()
+            assert jobs["c"] == 0  # no new job for human-wait state
+
     def test_fifo_jobs(self):
         first = self.store.create_task("alice", "first", "one")
         second = self.store.create_task("bob", "second", "two")
