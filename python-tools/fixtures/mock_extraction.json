@@ -1,0 +1,115 @@
+{
+  "samples": [
+    {
+      "sample_id": "S1",
+      "components": [
+        {"name": "PEO", "role": "matrix"},
+        {"name": "AgNW", "role": "filler"}
+      ],
+      "ratios": [
+        {
+          "component": "AgNW",
+          "raw_value": "25",
+          "raw_unit": "wt%",
+          "ratio_basis": "mass_fraction",
+          "normalized_value": 25.0,
+          "normalized_unit": "wt%",
+          "evidence_ids": ["EV-001"]
+        }
+      ],
+      "process_steps": [
+        {
+          "step_number": 1,
+          "description": "Dissolve PEO in deionized water at 5 wt%",
+          "parameters": {"temperature": "25 degC", "time": "2h"},
+          "evidence_ids": ["EV-002"]
+        },
+        {
+          "step_number": 2,
+          "description": "Add AgNW dispersion and sonicate",
+          "parameters": {"sonication_time": "30min", "power": "100W"},
+          "evidence_ids": ["EV-003"]
+        },
+        {
+          "step_number": 3,
+          "description": "Cast film and cure",
+          "parameters": {"temperature": "80 degC", "time": "2h"},
+          "evidence_ids": ["EV-004"]
+        }
+      ],
+      "performance_metrics": [
+        {
+          "property": "electrical conductivity",
+          "value": "5000",
+          "unit": "S/cm",
+          "evidence_ids": ["EV-005"]
+        },
+        {
+          "property": "tensile strength",
+          "value": "15",
+          "unit": "MPa",
+          "evidence_ids": ["EV-006"]
+        }
+      ],
+      "evidence": [
+        {
+          "evidence_id": "EV-001",
+          "field_path": "samples/S1/ratios/0/raw_value",
+          "work_id": "doi:10.1000/composition-001",
+          "file_version": "v1",
+          "page": 5,
+          "table": "Table 2",
+          "quote_or_value": "25 wt% AgNW",
+          "source_type": "explicit"
+        },
+        {
+          "evidence_id": "EV-002",
+          "field_path": "samples/S1/process_steps/0/parameters",
+          "work_id": "doi:10.1000/composition-001",
+          "file_version": "v1",
+          "page": 3,
+          "section": "2.2 Sample Preparation",
+          "source_type": "explicit"
+        },
+        {
+          "evidence_id": "EV-003",
+          "field_path": "samples/S1/process_steps/1/parameters",
+          "work_id": "doi:10.1000/composition-001",
+          "file_version": "v1",
+          "page": 3,
+          "section": "2.2 Sample Preparation",
+          "source_type": "explicit"
+        },
+        {
+          "evidence_id": "EV-004",
+          "field_path": "samples/S1/process_steps/2/parameters",
+          "work_id": "doi:10.1000/composition-001",
+          "file_version": "v1",
+          "page": 4,
+          "section": "2.3 Curing",
+          "source_type": "explicit"
+        },
+        {
+          "evidence_id": "EV-005",
+          "field_path": "samples/S1/performance_metrics/0/value",
+          "work_id": "doi:10.1000/benchmark-001",
+          "file_version": "v1",
+          "page": 7,
+          "figure": "Figure 3",
+          "quote_or_value": "~5000 S/cm",
+          "source_type": "estimated"
+        },
+        {
+          "evidence_id": "EV-006",
+          "field_path": "samples/S1/performance_metrics/1/value",
+          "work_id": "doi:10.1000/benchmark-001",
+          "file_version": "v1",
+          "page": 8,
+          "table": "Table 3",
+          "quote_or_value": "15 MPa",
+          "source_type": "explicit"
+        }
+      ]
+    }
+  ]
+}
