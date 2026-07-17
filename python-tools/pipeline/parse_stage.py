@@ -1,15 +1,17 @@
 """PARSING stage: parse downloaded PDFs into structured documents."""
 
+import hashlib
 import json
 import os
 
-from workflow_engine import WorkflowStore
+from workflow_engine import WorkerContext, WorkflowStore
 from artifact_utils import atomic_write_unique
 from pipeline.contracts import DocumentParser
 from workflow_models import ParsedDocument
 
 
 async def run_parse_stage(
+    ctx: WorkerContext,
     job: dict,
     store: WorkflowStore,
     parser: DocumentParser,
@@ -20,22 +22,36 @@ async def run_parse_stage(
     DocumentParser.parse(), saves the resulting ParsedDocument as a JSON
     artifact, and updates paper status. Advances the task to EXTRACTING
     when complete (fast-path skipping the unused READING stage).
+
+    Idempotency: on retry, already-parsed papers are detected via existing
+    artifacts and skipped. Content-addressed naming (SHA-256 prefix) prevents
+    FileExistsError on identical re-parses. Only actual parsing errors degrade
+    the paper.
     """
     task_id = job["task_id"]
-    papers = store.list_papers(task_id, "worker")
+    papers = store.list_papers_for_worker(ctx)
     fetched = [p for p in papers if p.get("paper_status") == "fetched"]
 
     if not fetched:
-        store.advance(task_id, "worker", "EXTRACTING")
+        store.advance_for_worker(ctx, "EXTRACTING")
         return {"parsed": 0, "degraded": 0}
 
     # Retrieve cached PDF artifacts for this task
     pdf_artifacts = store.get_artifacts(task_id, "pdf")
     pdf_by_paper = {a["paper_id"]: a for a in pdf_artifacts}
 
+    # Retrieve already-parsed artifacts (for retry idempotency)
+    parsed_artifacts = store.get_artifacts(task_id, "parsed_document")
+    already_parsed = {a["paper_id"] for a in parsed_artifacts}
+
     parsed_count = 0
     degraded_count = 0
     for paper in fetched:
+        if paper["id"] in already_parsed:
+            store.update_paper_status(paper["id"], "parsed")
+            parsed_count += 1
+            continue
+
         pdf_artifact = pdf_by_paper.get(paper["id"])
         if pdf_artifact is None or not os.path.exists(pdf_artifact["path"]):
             store.update_paper_status(
@@ -67,8 +83,9 @@ async def run_parse_stage(
             os.makedirs(paper_dir, exist_ok=True)
 
             json_bytes = parsed.model_dump_json(indent=2).encode("utf-8")
-            parsed_path = os.path.join(paper_dir, "parsed_document.json")
-            atomic_write_unique(json_bytes, parsed_path)
+            sha256 = hashlib.sha256(json_bytes).hexdigest()
+            parsed_path = os.path.join(paper_dir, f"parsed_document_{sha256[:16]}.json")
+            atomic_write_unique(json_bytes, parsed_path, expected_sha256=sha256)
 
             store.record_artifact(
                 task_id,
@@ -76,7 +93,12 @@ async def run_parse_stage(
                 "parsed_document",
                 "json",
                 parsed_path,
+                sha256,
             )
+            store.update_paper_status(paper["id"], "parsed")
+            parsed_count += 1
+        except FileExistsError:
+            # Race — another worker already wrote identical content, that's fine
             store.update_paper_status(paper["id"], "parsed")
             parsed_count += 1
         except Exception as exc:
@@ -86,5 +108,5 @@ async def run_parse_stage(
             degraded_count += 1
 
     # Advance to EXTRACTING (fast-path: READING stage is not yet implemented)
-    store.advance(task_id, "worker", "EXTRACTING")
+    store.advance_for_worker(ctx, "EXTRACTING")
     return {"parsed": parsed_count, "degraded": degraded_count}

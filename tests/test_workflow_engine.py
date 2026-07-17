@@ -446,9 +446,11 @@ class WorkflowStoreTest(unittest.TestCase):
                 rows = conn.execute(
                     "SELECT version, name, checksum FROM schema_migrations ORDER BY version"
                 ).fetchall()
-            self.assertEqual(len(rows), 2, "Both migrations should have been applied")
+            self.assertEqual(len(rows), 3, "All migrations should have been applied")
             self.assertEqual(rows[0]["version"], 1)
             self.assertEqual(rows[1]["version"], 2)
+            self.assertEqual(rows[2]["version"], 3)
+            self.assertEqual(rows[2]["name"], "003_artifact_idempotency.sql")
 
             # Tamper with 001_initial.sql
             with open(os.path.join(mig_dir, "001_initial.sql"), "a") as f:

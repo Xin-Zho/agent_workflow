@@ -524,11 +524,19 @@ class WorkflowStore:
         now = db_utc_now()
         artifact_id = uuid.uuid4().hex
         with self._connect() as conn:
-            conn.execute(
-                """INSERT INTO artifacts (id, task_id, paper_id, artifact_type, format, path, sha256, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (artifact_id, task_id, paper_id, artifact_type, format, path, sha256, now),
-            )
+            try:
+                conn.execute(
+                    """INSERT INTO artifacts (id, task_id, paper_id, artifact_type, format, path, sha256, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (artifact_id, task_id, paper_id, artifact_type, format, path, sha256, now),
+                )
+            except sqlite3.IntegrityError:
+                # Already exists — return existing record
+                row = conn.execute(
+                    "SELECT * FROM artifacts WHERE task_id=? AND paper_id=? AND artifact_type=? AND sha256=?",
+                    (task_id, paper_id, artifact_type, sha256),
+                ).fetchone()
+                return self._decode_row(row)
         return {"id": artifact_id, "path": path, "sha256": sha256}
 
     def get_artifacts(
