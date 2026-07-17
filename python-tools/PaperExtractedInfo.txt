@@ -1,0 +1,20 @@
+[
+{
+"sample_id": "S1",
+"components": [
+{"name": "PEO", "role": "matrix"}
+],
+"ratios": [
+{
+"component": "AgNW",
+"raw_value": "25",
+"raw_unit": "wt%",
+"ratio_basis": "mass_fraction",
+"evidence_ids": ["EV-001"]
+}
+],
+"process_steps": [
+{
+"step_number": 1,
+"description": "Dissolve PEO in water",
+"parameters": {

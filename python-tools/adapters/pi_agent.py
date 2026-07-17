@@ -50,17 +50,51 @@ class PiAgentAdapter:
         return ""
 
     def _extract_json(self, text: str) -> dict | list:
-        """Extract JSON from Pi's response. Tries markdown code blocks first,
-        then raw JSON."""
-        # Try ```json ... ``` block
-        m = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
+        """Extract JSON from Pi's response. Handles various formats Pi may return."""
+        if not text or not text.strip():
+            raise ValueError("Empty response from Pi")
+
+        # 1. Try ```json ... ``` block
+        m = re.search(r"```json\s*\n?(.*?)\n?```", text, re.DOTALL)
         if m:
             return json.loads(m.group(1))
-        # Try raw JSON
+
+        # 2. Try any ``` ... ``` code block
+        m = re.search(r"```\s*\n?(.*?)\n?```", text, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group(1))
+            except json.JSONDecodeError:
+                pass
+
+        # 3. Try raw JSON from start
         text = text.strip()
         if text.startswith("{") or text.startswith("["):
-            return json.loads(text)
-        raise ValueError(f"Cannot extract JSON from response: {text[:200]}...")
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                # Try to find the matching closing bracket
+                pass
+
+        # 4. Find first { or [ and extract balanced JSON
+        for start_char, end_char in [("{", "}"), ("[", "]")]:
+            idx = text.find(start_char)
+            if idx >= 0:
+                depth = 0
+                for i, ch in enumerate(text[idx:], start=idx):
+                    if ch == start_char:
+                        depth += 1
+                    elif ch == end_char:
+                        depth -= 1
+                        if depth == 0:
+                            candidate = text[idx:i + 1]
+                            try:
+                                return json.loads(candidate)
+                            except json.JSONDecodeError:
+                                break
+                break
+
+        raise ValueError(f"Cannot extract JSON from response (first 500 chars): {text[:500]}")
 
     async def screen_abstracts(
         self, task: TaskDefinition, papers: list[PaperMetadata]
@@ -83,6 +117,7 @@ class PiAgentAdapter:
         prompt = prompt.replace("{{PAPERS}}", papers_text)
 
         response = await client.send_prompt(prompt)
+        logger.info("Pi screen_abstracts response (%d chars)", len(response) if response else 0)
         data = self._extract_json(response)
 
         decisions = []
