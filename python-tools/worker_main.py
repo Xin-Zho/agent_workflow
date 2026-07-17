@@ -10,8 +10,6 @@ from workflow_config import WorkflowConfig
 from adapters.mock_search import MockSearchProvider, MockFulltextProvider
 from adapters.mock_embedding import MockEmbeddingRetriever, MockReranker
 from adapters.mock_parser import MockDocumentParser
-from adapters.mock_agent import MockAgentAdapter
-
 from pipeline.search_stage import run_search_stage
 from pipeline.screening_stage import run_screening_stage
 from pipeline.fulltext_stage import run_fulltext_stage
@@ -33,7 +31,18 @@ async def main():
     retriever = MockEmbeddingRetriever()
     reranker = MockReranker()
     parser = MockDocumentParser()
-    agent = MockAgentAdapter()
+
+    if config.agent_backend == "pi":
+        from adapters.pi_agent import PiAgentAdapter
+        agent = PiAgentAdapter(
+            pi_command=config.pi_command,
+            timeout=config.pi_timeout,
+        )
+        logger.info("Using PiAgentAdapter (real LLM)")
+    else:
+        from adapters.mock_agent import MockAgentAdapter
+        agent = MockAgentAdapter()
+        logger.info("Using MockAgentAdapter (mock)")
 
     # Wire stage handlers
     registry = StageRegistry(config)

@@ -47,6 +47,15 @@ class WorkflowConfig:
         "admin": {"password": "admin-pass", "role": "admin"},
     })
 
+    # Agent backend
+    agent_backend: str = field(
+        default_factory=lambda: os.environ.get("AGENT_BACKEND", "mock")
+    )
+    pi_command: str = field(
+        default_factory=lambda: os.environ.get("PI_COMMAND", "pi")
+    )
+    pi_timeout: int = int(os.environ.get("PI_TIMEOUT_SECONDS", "300"))
+
 
 def load_config(**overrides) -> WorkflowConfig:
     """Factory that applies optional overrides (useful for tests)."""
