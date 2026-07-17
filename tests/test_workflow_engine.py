@@ -142,6 +142,52 @@ class WorkflowStoreTest(unittest.TestCase):
         self.assertEqual(latest[0]["version"], 2)
         self.assertEqual(latest[0]["payload"]["value"], 2)
 
+    def test_migration_checksum_validation(self):
+        """Tampering with a migration after it was applied raises RuntimeError."""
+        import shutil
+        import tempfile
+
+        tmp = tempfile.mkdtemp()
+        try:
+            mig_dir = os.path.join(tmp, "migrations")
+            os.makedirs(mig_dir)
+            src = os.path.join(
+                os.path.dirname(__file__), "..", "python-tools", "migrations"
+            )
+            for f in os.listdir(src):
+                shutil.copy2(os.path.join(src, f), os.path.join(mig_dir, f))
+
+            db_path = os.path.join(tmp, "test.db")
+
+            # Subclass that uses the temp migrations directory
+            class _TestStore(WorkflowStore):
+                _MIGRATIONS_DIR = mig_dir
+
+            # First run: apply migrations normally
+            store = _TestStore(db_path)
+            # Verify schema_migrations is populated
+            from workflow_engine import _hashlib as hl
+
+            with store._connect() as conn:
+                rows = conn.execute(
+                    "SELECT version, name, checksum FROM schema_migrations ORDER BY version"
+                ).fetchall()
+            self.assertEqual(len(rows), 2, "Both migrations should have been applied")
+            self.assertEqual(rows[0]["version"], 1)
+            self.assertEqual(rows[1]["version"], 2)
+
+            # Tamper with 001_initial.sql
+            with open(os.path.join(mig_dir, "001_initial.sql"), "a") as f:
+                f.write("\n-- tampered\n")
+
+            # Second store on same DB should fail with checksum mismatch
+            with self.assertRaises(RuntimeError) as ctx:
+                _TestStore(db_path)
+            self.assertIn("checksum changed", str(ctx.exception))
+            self.assertIn("001_initial.sql", str(ctx.exception))
+        finally:
+            shutil.rmtree(tmp)
+
 
 if __name__ == "__main__":
     unittest.main()
