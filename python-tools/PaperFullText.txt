@@ -1,8 +1,0 @@
---- Page 1 ---
-Sample Material: PEO/AgNW Composite
-Preparation: Dissolve PEO in deionized water at 5 wt%.
-Add AgNW dispersion and sonicate for 30 min at 100W.
-Cast film and cure at 80 degC for 2h.
-Results: Electrical conductivity ~5000 S/cm (Figure 3).
-Tensile strength 15 MPa (Table 3).
-Table 2: Composition - 25 wt% AgNW in PEO matrix.
