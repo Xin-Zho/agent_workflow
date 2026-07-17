@@ -3,6 +3,8 @@
 import asyncio
 import logging
 
+logger = logging.getLogger(__name__)
+
 from workflow_engine import WorkflowStore
 from workflow_worker import WorkflowWorker, StageRegistry, FunctionStageHandler
 from workflow_config import WorkflowConfig
