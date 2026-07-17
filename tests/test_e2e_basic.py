@@ -378,3 +378,30 @@ async def test_e2e_single_paper_degradation():
         import shutil
 
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_e2e_lease_fencing():
+    """Old worker cannot overwrite new worker's result after lease loss."""
+    tmp = tempfile.mkdtemp()
+    try:
+        config = WorkflowConfig(db_path=os.path.join(tmp, "test.db"))
+        store = WorkflowStore(config.db_path)
+        task = store.create_task("alice", "test", "query")
+        store.start_search(task["id"], "alice")
+        # Worker 1 claims
+        job = store.claim_next_job("worker-1", lease_duration=1)
+        assert job is not None
+        # Manually change lease_token (simulating Worker 2 re-claim after expiry)
+        with store._connect() as conn:
+            conn.execute(
+                "UPDATE jobs SET lease_token = 'new-token', worker_id = 'worker-2' WHERE id = ?",
+                (job["id"],),
+            )
+        # Worker 1 tries to complete with old token — must fail
+        ok = store.complete_job(job["id"], "worker-1", job["lease_token"], result={})
+        assert ok is False, "Old worker should be fenced"
+    finally:
+        import shutil
+
+        shutil.rmtree(tmp, ignore_errors=True)
