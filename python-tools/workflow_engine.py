@@ -371,13 +371,23 @@ class WorkflowStore:
                 raise NotFoundError(f"Unknown paper ids: {sorted(unknown)}")
             conn.execute("UPDATE papers SET selection_status = 'rejected' WHERE task_id = ?", (task_id,))
             conn.executemany(
-                "UPDATE papers SET selection_status = 'selected', updated_at = ? WHERE id = ?",
+                "UPDATE papers SET selection_status = 'selected', paper_status = 'selected', updated_at = ? WHERE id = ?",
                 [(utc_now(), paper_id) for paper_id in selected_ids],
             )
         return self._transition(
             task, actor_id, TaskStatus.FETCHING_FULLTEXT,
             "papers_approved", {"selected_ids": selected_ids}, enqueue=True,
         )
+
+    def update_paper_status(
+        self, paper_id: str, status: str, error: str | None = None
+    ) -> None:
+        now = utc_now()
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE papers SET paper_status = ?, error_message = ?, updated_at = ? WHERE id = ?",
+                (status, error, now, paper_id),
+            )
 
     def record_extraction(
         self,
@@ -462,6 +472,60 @@ class WorkflowStore:
                    ON e.paper_id = latest.paper_id AND e.version = latest.version
                    ORDER BY e.created_at""",
                 (task_id,),
+            ).fetchall()
+        return [self._decode_row(row) for row in rows]
+
+    def record_artifact(
+        self,
+        task_id: str,
+        paper_id: str | None,
+        artifact_type: str,
+        format: str,
+        path: str,
+        sha256: str | None = None,
+    ) -> dict[str, Any]:
+        now = utc_now()
+        artifact_id = uuid.uuid4().hex
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT INTO artifacts (id, task_id, paper_id, artifact_type, format, path, sha256, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (artifact_id, task_id, paper_id, artifact_type, format, path, sha256, now),
+            )
+        return {"id": artifact_id, "path": path, "sha256": sha256}
+
+    def get_artifacts(
+        self, task_id: str, artifact_type: str | None = None
+    ) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            if artifact_type:
+                rows = conn.execute(
+                    "SELECT * FROM artifacts WHERE task_id = ? AND artifact_type = ? ORDER BY created_at",
+                    (task_id, artifact_type),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM artifacts WHERE task_id = ? ORDER BY created_at", (task_id,),
+                ).fetchall()
+        return [self._decode_row(row) for row in rows]
+
+    def record_report(self, task_id: str, path: str, format: str = "markdown") -> dict:
+        now = utc_now()
+        report_id = uuid.uuid4().hex
+        with self._connect() as conn:
+            version = conn.execute(
+                "SELECT COALESCE(MAX(version), 0) + 1 FROM reports WHERE task_id = ?", (task_id,),
+            ).fetchone()[0]
+            conn.execute(
+                "INSERT INTO reports (id, task_id, version, format, path, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (report_id, task_id, version, format, path, now),
+            )
+        return {"id": report_id, "version": version, "path": path}
+
+    def get_reports(self, task_id: str) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM reports WHERE task_id = ? ORDER BY version DESC", (task_id,),
             ).fetchall()
         return [self._decode_row(row) for row in rows]
 

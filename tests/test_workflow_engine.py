@@ -235,6 +235,48 @@ class WorkflowStoreTest(unittest.TestCase):
                     (task["id"], "SEARCHING", "{}", "test-key-123", utc_now(), utc_now()),
                 )
 
+    def test_paper_status_transitions(self):
+        task = self._task_at_paper_review()
+        papers = self.store.list_papers(task["id"], "alice")
+        p1 = papers[0]
+        assert p1["paper_status"] == "candidate"
+
+        task = self.store.approve_papers(task["id"], "alice", [p1["id"]])
+        papers = self.store.list_papers(task["id"], "alice")
+        selected = [p for p in papers if p["id"] == p1["id"]][0]
+        assert selected["paper_status"] == "selected"
+
+        # Worker marks as fetched
+        self.store.update_paper_status(p1["id"], "fetched")
+        papers = self.store.list_papers(task["id"], "alice")
+        fetched = [p for p in papers if p["id"] == p1["id"]][0]
+        assert fetched["paper_status"] == "fetched"
+
+    def test_paper_degraded_on_error(self):
+        task = self._task_at_paper_review()
+        papers = self.store.list_papers(task["id"], "alice")
+        self.store.approve_papers(task["id"], "alice", [papers[0]["id"]])
+        self.store.update_paper_status(papers[0]["id"], "degraded", error="PDF corrupt")
+        updated = self.store.list_papers(task["id"], "alice")
+        p = [x for x in updated if x["id"] == papers[0]["id"]][0]
+        assert p["paper_status"] == "degraded"
+        assert p["error_message"] == "PDF corrupt"
+
+    def test_artifact_recording(self):
+        task = self.store.create_task("alice", "test", "query")
+        artifact = self.store.record_artifact(
+            task_id=task["id"],
+            paper_id=None,
+            artifact_type="report",
+            format="markdown",
+            path="/tmp/test/report.md",
+            sha256="abc123",
+        )
+        assert artifact["id"] is not None
+        artifacts = self.store.get_artifacts(task["id"])
+        assert len(artifacts) == 1
+        assert artifacts[0]["sha256"] == "abc123"
+
     def test_migration_checksum_validation(self):
         """Tampering with a migration after it was applied raises RuntimeError."""
         import shutil
