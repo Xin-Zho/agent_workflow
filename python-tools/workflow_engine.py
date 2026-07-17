@@ -22,7 +22,10 @@ from typing import Any, Iterable
 
 
 def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc).isoformat(sep=' ')
+
+
+ClaimedJob = dict[str, Any]  # returned by claim_next_job
 
 
 class WorkflowError(RuntimeError):
@@ -542,31 +545,142 @@ class WorkflowStore:
         # updated row directly also lets an administrator review another user's task.
         return self._decode_row(row)
 
-    def next_job(self) -> dict[str, Any] | None:
-        """Claim the oldest queued job. SQLite transaction preserves FIFO order."""
-        with self._lock, self._connect() as conn:
+    def claim_next_job(self, worker_id: str, lease_duration: int = 300) -> ClaimedJob | None:
+        """Claim the oldest eligible job with lease fencing."""
+        import uuid as _uuid
+        from datetime import timedelta as _timedelta
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat(sep=' ')
+        lease_token = _uuid.uuid4().hex
+        lease_expires_at = (now_dt + _timedelta(seconds=lease_duration)).isoformat(sep=' ')
+        with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
-                "SELECT * FROM jobs WHERE status = 'queued' ORDER BY id LIMIT 1"
-            ).fetchone()
-            if not row:
+            try:
+                # First, promote dead letters
+                conn.execute(
+                    """UPDATE jobs SET status = 'dead_letter', updated_at = ?
+                       WHERE ((status = 'retry_wait' AND next_retry_at <= ? AND attempts >= max_attempts)
+                          OR (status = 'running' AND lease_expires_at < ? AND attempts >= max_attempts))""",
+                    (now, now, now),
+                )
+                row = conn.execute(
+                    """UPDATE jobs SET
+                           status = 'running',
+                           worker_id = ?,
+                           claimed_at = ?,
+                           lease_expires_at = ?,
+                           lease_token = ?,
+                           attempts = attempts + 1
+                       WHERE id = (
+                           SELECT id FROM jobs
+                           WHERE (status = 'queued')
+                              OR (status = 'running' AND lease_expires_at < ?)
+                              OR (status = 'retry_wait' AND next_retry_at <= ?)
+                           ORDER BY id LIMIT 1
+                       )
+                       AND attempts < max_attempts
+                       RETURNING *""",
+                    (worker_id, now, lease_expires_at, lease_token, now, now),
+                ).fetchone()
                 conn.commit()
-                return None
-            conn.execute(
-                "UPDATE jobs SET status = 'running', attempts = attempts + 1, updated_at = ? WHERE id = ?",
-                (utc_now(), row["id"]),
-            )
-            conn.commit()
-        job = self._decode_row(row)
-        job["status"] = "running"
-        job["attempts"] += 1
-        return job
+            except Exception:
+                conn.rollback()
+                raise
+        if row is None:
+            return None
+        return dict(row)
 
-    def finish_job(self, job_id: int, error: str | None = None) -> None:
+    def complete_job(self, job_id: int, worker_id: str, lease_token: str,
+                     result: dict[str, Any] | None = None) -> bool:
+        """Complete a job — fenced by worker_id + lease_token."""
+        now = utc_now()
+        with self._connect() as conn:
+            cur = conn.execute(
+                """UPDATE jobs SET status = 'completed', result_json = ?, updated_at = ?
+                   WHERE id = ? AND worker_id = ? AND lease_token = ? AND status = 'running'""",
+                (self._json(result or {}), now, job_id, worker_id, lease_token),
+            )
+            if cur.rowcount == 0:
+                return False
+            # Record attempt
+            conn.execute(
+                """INSERT INTO job_attempts (job_id, worker_id, lease_token, attempt_num,
+                   started_at, finished_at, result_json)
+                   SELECT ?, ?, ?, attempts, claimed_at, ?, ? FROM jobs WHERE id = ?""",
+                (job_id, worker_id, lease_token, now, self._json(result or {}), job_id),
+            )
+            return True
+
+    def retry_job(self, job_id: int, worker_id: str, lease_token: str,
+                  error: str = "") -> bool:
+        """Mark job for retry after backoff — fenced."""
+        now = utc_now()
+        with self._connect() as conn:
+            # Record failed attempt
+            conn.execute(
+                """INSERT INTO job_attempts (job_id, worker_id, lease_token, attempt_num,
+                   started_at, finished_at, error)
+                   SELECT ?, ?, ?, attempts, claimed_at, ?, ? FROM jobs WHERE id = ?""",
+                (job_id, worker_id, lease_token, now, error, job_id),
+            )
+            # Determine delay based on attempts
+            row = conn.execute("SELECT attempts, max_attempts FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            if row is None:
+                return False
+            delay = {1: 5, 2: 30}.get(row["attempts"], 30)
+            # If max attempts reached, set next_retry_at to now so
+            # _promote_dead_letters or the inline promotion in claim_next_job
+            # immediately moves it to dead_letter.
+            retry_delay = 0 if row["attempts"] >= row["max_attempts"] else delay
+            cur = conn.execute(
+                """UPDATE jobs SET status = 'retry_wait', next_retry_at = datetime(?, '+' || ? || ' seconds'),
+                   worker_id = NULL, lease_token = NULL, error = ?, updated_at = ?
+                   WHERE id = ? AND worker_id = ? AND lease_token = ? AND status = 'running'""",
+                (now, str(retry_delay), error, now, job_id, worker_id, lease_token),
+            )
+            return cur.rowcount > 0
+
+    def fail_job(self, job_id: int, worker_id: str, lease_token: str,
+                 error: str = "") -> bool:
+        """Permanently fail a job — fenced."""
+        now = utc_now()
         with self._connect() as conn:
             conn.execute(
-                "UPDATE jobs SET status = ?, error = ?, updated_at = ? WHERE id = ?",
-                ("failed" if error else "completed", error, utc_now(), job_id),
+                """INSERT INTO job_attempts (job_id, worker_id, lease_token, attempt_num,
+                   started_at, finished_at, error)
+                   SELECT ?, ?, ?, attempts, claimed_at, ?, ? FROM jobs WHERE id = ?""",
+                (job_id, worker_id, lease_token, now, error, job_id),
+            )
+            cur = conn.execute(
+                """UPDATE jobs SET status = 'failed', error = ?, updated_at = ?
+                   WHERE id = ? AND worker_id = ? AND lease_token = ? AND status = 'running'""",
+                (error, now, job_id, worker_id, lease_token),
+            )
+            return cur.rowcount > 0
+
+    def renew_lease(self, job_id: int, worker_id: str, lease_token: str,
+                    lease_duration: int = 300) -> bool:
+        """Extend lease — fenced. Returns False if lease was lost."""
+        from datetime import timedelta as _timedelta
+        now_dt = datetime.now(timezone.utc)
+        lease_expires_at = (now_dt + _timedelta(seconds=lease_duration)).isoformat(sep=' ')
+        with self._connect() as conn:
+            cur = conn.execute(
+                """UPDATE jobs SET lease_expires_at = ?
+                   WHERE id = ? AND worker_id = ? AND lease_token = ? AND status = 'running'""",
+                (lease_expires_at, job_id, worker_id, lease_token),
+            )
+            return cur.rowcount > 0
+
+    def _promote_dead_letters(self) -> None:
+        """Move maxed-out jobs to dead_letter."""
+        now = utc_now()
+        with self._connect() as conn:
+            conn.execute(
+                """UPDATE jobs SET status = 'dead_letter', updated_at = ?
+                   WHERE ((status = 'retry_wait' AND next_retry_at <= ? AND attempts >= max_attempts)
+                      OR (status = 'running' AND lease_expires_at < ? AND attempts >= max_attempts))""",
+                (now, now, now),
             )
 
     def events(self, task_id: str, actor_id: str, is_admin: bool = False) -> list[dict[str, Any]]:

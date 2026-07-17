@@ -12,7 +12,10 @@ from workflow_engine import (  # noqa: E402
     PermissionDeniedError,
     TaskStatus,
     WorkflowStore,
+    utc_now,
 )
+
+import sqlite3  # noqa: E402
 
 
 class WorkflowStoreTest(unittest.TestCase):
@@ -119,12 +122,12 @@ class WorkflowStoreTest(unittest.TestCase):
         self.store.start_search(first["id"], "alice")
         self.store.start_search(second["id"], "bob")
 
-        job1 = self.store.next_job()
-        job2 = self.store.next_job()
+        job1 = self.store.claim_next_job("worker-1")
+        job2 = self.store.claim_next_job("worker-1")
         self.assertEqual(job1["task_id"], first["id"])
         self.assertEqual(job2["task_id"], second["id"])
-        self.store.finish_job(job1["id"])
-        self.store.finish_job(job2["id"], "simulated failure")
+        self.store.complete_job(job1["id"], "worker-1", job1["lease_token"], result={"ok": True})
+        self.store.fail_job(job2["id"], "worker-1", job2["lease_token"], error="simulated failure")
 
     def test_extraction_versions_keep_latest(self):
         task = self._task_at_paper_review()
@@ -141,6 +144,96 @@ class WorkflowStoreTest(unittest.TestCase):
         self.assertEqual(len(latest), 1)
         self.assertEqual(latest[0]["version"], 2)
         self.assertEqual(latest[0]["payload"]["value"], 2)
+
+    def test_job_lease_claim_and_complete(self):
+        """Worker claims, completes; job status transitions correctly."""
+        task = self.store.create_task("alice", "test", "query")
+        self.store.start_search(task["id"], "alice")
+        job = self.store.claim_next_job("worker-1")
+        assert job is not None
+        assert job["status"] == "running"
+        assert job["worker_id"] == "worker-1"
+        assert job["lease_token"] is not None
+        assert job["attempts"] == 1
+        self.store.complete_job(job["id"], "worker-1", job["lease_token"],
+                                result={"papers_found": 10})
+        # Job should be completed
+        with self.store._connect() as conn:
+            row = conn.execute("SELECT status FROM jobs WHERE id = ?", (job["id"],)).fetchone()
+            assert row["status"] == "completed"
+
+    def test_job_lease_fencing(self):
+        """complete_job with wrong worker_id or lease_token must fail."""
+        task = self.store.create_task("alice", "test", "query")
+        self.store.start_search(task["id"], "alice")
+        job = self.store.claim_next_job("worker-1")
+        # Try completing with wrong lease_token
+        self.store.complete_job(job["id"], "worker-1", "wrong-token", result={})
+        # Job should still be running (fencing rejected the update)
+        with self.store._connect() as conn:
+            row = conn.execute("SELECT status FROM jobs WHERE id = ?", (job["id"],)).fetchone()
+            assert row["status"] == "running"
+
+    def test_job_lease_renewal(self):
+        """Renewing lease extends lease_expires_at."""
+        task = self.store.create_task("alice", "test", "query")
+        self.store.start_search(task["id"], "alice")
+        job = self.store.claim_next_job("worker-1")
+        old_expiry = job["lease_expires_at"]
+        ok = self.store.renew_lease(job["id"], "worker-1", job["lease_token"])
+        assert ok is True
+        with self.store._connect() as conn:
+            row = conn.execute("SELECT lease_expires_at FROM jobs WHERE id = ?", (job["id"],)).fetchone()
+            assert row["lease_expires_at"] > old_expiry
+
+    def test_job_lease_renewal_wrong_token(self):
+        """Renewing with wrong lease_token must fail."""
+        task = self.store.create_task("alice", "test", "query")
+        self.store.start_search(task["id"], "alice")
+        job = self.store.claim_next_job("worker-1")
+        ok = self.store.renew_lease(job["id"], "worker-1", "wrong-token")
+        assert ok is False
+
+    def test_job_retry_and_dead_letter(self):
+        """After max_attempts, job goes to dead_letter."""
+        task = self.store.create_task("alice", "test", "query")
+        self.store.start_search(task["id"], "alice")
+        # Manually set max_attempts low for test
+        with self.store._connect() as conn:
+            conn.execute("UPDATE jobs SET max_attempts = 2 WHERE task_id = ?", (task["id"],))
+        job = self.store.claim_next_job("worker-1")
+        assert job["attempts"] == 1
+        self.store.retry_job(job["id"], "worker-1", job["lease_token"], error="test error")
+        # Wait for retry (set next_retry_at to now)
+        with self.store._connect() as conn:
+            conn.execute("UPDATE jobs SET next_retry_at = ? WHERE id = ?",
+                         (utc_now(), job["id"]))
+        job2 = self.store.claim_next_job("worker-1")
+        assert job2["attempts"] == 2
+        self.store.retry_job(job2["id"], "worker-1", job2["lease_token"], error="test error 2")
+        # promote
+        self.store._promote_dead_letters()
+        with self.store._connect() as conn:
+            row = conn.execute("SELECT status FROM jobs WHERE id = ?", (job["id"],)).fetchone()
+            assert row["status"] == "dead_letter"
+
+    def test_idempotency_key_duplicate_prevented(self):
+        """Two jobs with same idempotency key cannot coexist."""
+        task = self.store.create_task("alice", "test", "query")
+        self.store.start_search(task["id"], "alice")
+        # Insert first job with idempotency_key manually
+        with self.store._connect() as conn:
+            conn.execute(
+                "INSERT INTO jobs (task_id, stage, payload_json, status, idempotency_key, created_at, updated_at) VALUES (?, ?, ?, 'queued', ?, ?, ?)",
+                (task["id"], "SEARCHING", "{}", "test-key-123", utc_now(), utc_now()),
+            )
+        # Try inserting second with same key — should fail
+        with self.assertRaises(sqlite3.IntegrityError):
+            with self.store._connect() as conn:
+                conn.execute(
+                    "INSERT INTO jobs (task_id, stage, payload_json, status, idempotency_key, created_at, updated_at) VALUES (?, ?, ?, 'queued', ?, ?, ?)",
+                    (task["id"], "SEARCHING", "{}", "test-key-123", utc_now(), utc_now()),
+                )
 
     def test_migration_checksum_validation(self):
         """Tampering with a migration after it was applied raises RuntimeError."""
