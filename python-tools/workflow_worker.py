@@ -5,9 +5,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Protocol
+from dataclasses import dataclass
+from typing import Awaitable, Callable, Protocol
 
-from workflow_engine import WorkflowStore
+from workflow_engine import WorkerContext, WorkflowStore
 from workflow_config import WorkflowConfig
 
 logger = logging.getLogger(__name__)
@@ -24,15 +25,38 @@ class LeaseLostError(Exception):
 
 
 class StageHandler(Protocol):
-    async def run(self, job: dict, store: WorkflowStore) -> dict:
+    async def run(self, job: dict, store: WorkflowStore, ctx: WorkerContext) -> dict:
         """Execute a pipeline stage. Raise RetryableError or FatalError on failure."""
         ...
 
 
-HUMAN_WAIT_STAGES = {
+StageFunction = Callable[[WorkerContext, dict, WorkflowStore], Awaitable[dict]]
+
+
+@dataclass
+class FunctionStageHandler:
+    """Explicit adapter that wraps a StageFunction for registration.
+
+    Replaces the anonymous ``type("Handler", (), {"run": ...})()`` pattern.
+    """
+
+    name: str
+    function: StageFunction
+
+    async def run(self, job: dict, store: WorkflowStore, ctx: WorkerContext) -> dict:
+        return await self.function(ctx, job, store)
+
+
+HUMAN_WAIT_STAGES: frozenset[str] = frozenset({
     "WAITING_PAPER_APPROVAL", "WAITING_DATA_REVIEW",
     "CLARIFYING", "DRAFT", "COMPLETED", "FAILED", "PAUSED",
-}
+})
+
+# Automated pipeline stages that MUST have a handler registered.
+AUTOMATED_STAGES: frozenset[str] = frozenset({
+    "SEARCHING", "SCREENING", "FETCHING_FULLTEXT",
+    "PARSING", "READING", "EXTRACTING", "VALIDATING", "GENERATING_REPORT",
+})
 
 
 class StageRegistry:
@@ -48,6 +72,15 @@ class StageRegistry:
         if stage not in self._handlers:
             raise FatalError(f"No handler registered for stage: {stage}")
         return self._handlers[stage]
+
+    def validate_required_stages(self) -> None:
+        """Fail fast if any automated stage lacks a registered handler."""
+        missing = AUTOMATED_STAGES - set(self._handlers.keys())
+        if missing:
+            raise FatalError(
+                f"Missing stage handlers: {sorted(missing)}. "
+                f"All automated stages must be registered before starting the worker."
+            )
 
 
 class WorkflowWorker:
@@ -71,9 +104,16 @@ class WorkflowWorker:
             handler_task: asyncio.Task | None = None
             renewal_task: asyncio.Task | None = None
 
+            worker_ctx = WorkerContext(
+                worker_id=self.config.worker_id,
+                job_id=job["id"],
+                task_id=job["task_id"],
+                lease_token=job["lease_token"],
+            )
+
             async def run_handler():
                 handler = self.registry.get(job["stage"])
-                return await handler.run(job, self.store)
+                return await handler.run(job, self.store, worker_ctx)
 
             async def renew_or_die():
                 while True:

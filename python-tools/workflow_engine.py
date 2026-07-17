@@ -580,7 +580,7 @@ class WorkflowStore:
         target_status = TaskStatus(target)
         allowed: dict[TaskStatus, set[TaskStatus]] = {
             TaskStatus.FETCHING_FULLTEXT: {TaskStatus.PARSING},
-            TaskStatus.PARSING: {TaskStatus.READING, TaskStatus.EXTRACTING},  # fast-path: READING handler not yet
+            TaskStatus.PARSING: {TaskStatus.READING},
             TaskStatus.READING: {TaskStatus.EXTRACTING},
             TaskStatus.EXTRACTING: {TaskStatus.VALIDATING},
             TaskStatus.VALIDATING: {TaskStatus.GENERATING_REPORT},
@@ -681,12 +681,7 @@ class WorkflowStore:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 # First, promote dead letters
-                conn.execute(
-                    """UPDATE jobs SET status = 'dead_letter', updated_at = ?
-                       WHERE ((status = 'retry_wait' AND next_retry_at <= ? AND attempts >= max_attempts)
-                          OR (status = 'running' AND lease_expires_at < ? AND attempts >= max_attempts))""",
-                    (now, now, now),
-                )
+                self._promote_dead_letters(conn=conn, now=now)
                 row = conn.execute(
                     """UPDATE jobs SET
                            status = 'running',
@@ -819,16 +814,31 @@ class WorkflowStore:
             )
             return cur.rowcount > 0
 
-    def _promote_dead_letters(self) -> None:
-        """Move maxed-out jobs to dead_letter."""
-        now = db_utc_now()
-        with self._connect() as conn:
+    def _promote_dead_letters(self, conn=None, now=None) -> None:
+        """Move maxed-out jobs to dead_letter.
+
+        Args:
+            conn: Optional existing connection. Caller manages the transaction
+                  lifecycle when a connection is provided.
+            now:  Optional timestamp string. Generated via db_utc_now() when
+                  not provided.
+        """
+        now = now or db_utc_now()
+        if conn is not None:
             conn.execute(
                 """UPDATE jobs SET status = 'dead_letter', updated_at = ?
                    WHERE ((status = 'retry_wait' AND next_retry_at <= ? AND attempts >= max_attempts)
                       OR (status = 'running' AND lease_expires_at < ? AND attempts >= max_attempts))""",
                 (now, now, now),
             )
+        else:
+            with self._connect() as c:
+                c.execute(
+                    """UPDATE jobs SET status = 'dead_letter', updated_at = ?
+                       WHERE ((status = 'retry_wait' AND next_retry_at <= ? AND attempts >= max_attempts)
+                          OR (status = 'running' AND lease_expires_at < ? AND attempts >= max_attempts))""",
+                    (now, now, now),
+                )
 
     def events(self, task_id: str, actor_id: str, is_admin: bool = False) -> list[dict[str, Any]]:
         self.get_task(task_id, actor_id, is_admin)
@@ -993,7 +1003,7 @@ class WorkflowStore:
         target_status = TaskStatus(target)
         allowed: dict[TaskStatus, set[TaskStatus]] = {
             TaskStatus.FETCHING_FULLTEXT: {TaskStatus.PARSING},
-            TaskStatus.PARSING: {TaskStatus.READING, TaskStatus.EXTRACTING},
+            TaskStatus.PARSING: {TaskStatus.READING},
             TaskStatus.READING: {TaskStatus.EXTRACTING},
             TaskStatus.EXTRACTING: {TaskStatus.VALIDATING},
             TaskStatus.VALIDATING: {TaskStatus.GENERATING_REPORT},

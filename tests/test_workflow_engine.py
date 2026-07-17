@@ -795,6 +795,7 @@ class WorkerContextAuthTest(unittest.TestCase):
         )
         # Advance through stages to GENERATING_REPORT
         self.store.advance_for_worker(ctx, "PARSING")
+        self.store.advance_for_worker(ctx, "READING")
         self.store.advance_for_worker(ctx, "EXTRACTING")
         self.store.advance_for_worker(ctx, "VALIDATING")
         self.store.advance_for_worker(ctx, "GENERATING_REPORT")

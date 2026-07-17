@@ -20,8 +20,9 @@ async def run_parse_stage(
 
     For each fetched paper, reads the PDF artifact, delegates to
     DocumentParser.parse(), saves the resulting ParsedDocument as a JSON
-    artifact, and updates paper status. Advances the task to EXTRACTING
-    when complete (fast-path skipping the unused READING stage).
+    artifact, and updates paper status. Advances the task to READING
+    on completion (the formal READING stage processes the document before
+    extraction).
 
     Idempotency: on retry, already-parsed papers are detected via existing
     artifacts and skipped. Content-addressed naming (SHA-256 prefix) prevents
@@ -33,7 +34,7 @@ async def run_parse_stage(
     fetched = [p for p in papers if p.get("paper_status") == "fetched"]
 
     if not fetched:
-        store.advance_for_worker(ctx, "EXTRACTING")
+        store.advance_for_worker(ctx, "READING")
         return {"parsed": 0, "degraded": 0}
 
     # Retrieve cached PDF artifacts for this task
@@ -107,6 +108,6 @@ async def run_parse_stage(
             )
             degraded_count += 1
 
-    # Advance to EXTRACTING (fast-path: READING stage is not yet implemented)
-    store.advance_for_worker(ctx, "EXTRACTING")
+    # Advance to READING (transition to formal READING stage)
+    store.advance_for_worker(ctx, "READING")
     return {"parsed": parsed_count, "degraded": degraded_count}
